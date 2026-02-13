@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { getProvider, getSigner, getContract } from '../contract';
+import { getProvider, getSigner, getContract, getContractErrorDetails, sendTxWithNonceRetry } from '../contract';
 import { ethers } from 'ethers';
 
 // Read from env or use hardcoded defaults
@@ -118,6 +118,32 @@ export default function VoteList({ mode = 'production' }) {
           const hasVoted = await contract.hasVoterVoted(i, voterAddress);
           const totalVotes = await contract.getTotalVotes(i);
           const optionsCount = await contract.getOptionsCount(i);
+          let tokenConfig = {
+            enabled: false,
+            tokenRequired: false,
+            tokensPerVoter: 0,
+            allowGaslessVoting: false
+          };
+
+          try {
+            const rawTokenConfig = await contract.getTokenConfig(i);
+            tokenConfig = {
+              enabled: rawTokenConfig?.enabled ?? rawTokenConfig?.[0] ?? false,
+              tokenRequired: rawTokenConfig?.tokenRequired ?? rawTokenConfig?.[1] ?? false,
+              tokensPerVoter: Number(rawTokenConfig?.tokensPerVoter ?? rawTokenConfig?.[2] ?? 0),
+              allowGaslessVoting: rawTokenConfig?.allowGaslessVoting ?? rawTokenConfig?.[3] ?? false
+            };
+          } catch {
+          }
+
+          let voterTokenBalance = 0;
+          if (tokenConfig.enabled) {
+            try {
+              voterTokenBalance = Number(await contract.getVoterTokenBalance(i, voterAddress));
+            } catch {
+            }
+          }
+
           const endTime = Number(poll.endTime);
           const nowTs = Math.floor(Date.now() / 1000);
           const startTime = Number(poll.startTime);
@@ -176,7 +202,9 @@ export default function VoteList({ mode = 'production' }) {
               status,
               hasVoted,
               totalVotes: Number(totalVotes),
-              optionsCount: Number(optionsCount)
+              optionsCount: Number(optionsCount),
+              tokenConfig,
+              voterTokenBalance
             });
           }
         } catch (pollErr) {
@@ -235,12 +263,93 @@ export default function VoteList({ mode = 'production' }) {
 
   async function vote(pollId, optionId) {
     setStatus(null);
+    let contract;
     try {
       const signer = walletSigner || await getSigner();
-      const contract = getContract(signer);
+      contract = getContract(signer);
+      const voterAddress = await signer.getAddress();
+
+      let tokenConfig = {
+        enabled: false,
+        tokenRequired: false,
+        allowGaslessVoting: false
+      };
+      let tokenFlagsFromPoll = {
+        enabled: false,
+        required: false
+      };
+
+      const currentPoll = polls.find(p => Number(p.id) === Number(pollId));
+
+      try {
+        const rawTokenConfig = await contract.getTokenConfig(pollId);
+        tokenConfig = {
+          enabled: rawTokenConfig?.enabled ?? rawTokenConfig?.[0] ?? false,
+          tokenRequired: rawTokenConfig?.tokenRequired ?? rawTokenConfig?.[1] ?? false,
+          allowGaslessVoting: rawTokenConfig?.allowGaslessVoting ?? rawTokenConfig?.[3] ?? false
+        };
+      } catch {
+      }
+
+      try {
+        const rawPoll = await contract.polls(pollId);
+        tokenFlagsFromPoll = {
+          enabled: Boolean(rawPoll?.tokenVotingEnabled ?? rawPoll?.[8] ?? false),
+          required: Boolean(rawPoll?.tokenVotingRequired ?? rawPoll?.[9] ?? false)
+        };
+      } catch {
+      }
+
+      const isTokenEnabledEffective = Boolean(
+        tokenConfig.enabled || tokenFlagsFromPoll.enabled || currentPoll?.tokenConfig?.enabled
+      );
+      const isTokenRequiredEffective = Boolean(
+        tokenConfig.tokenRequired || tokenFlagsFromPoll.required || currentPoll?.tokenConfig?.tokenRequired
+      );
 
       setStatus('Submitting vote...');
-      const tx = await contract.voteInPoll(pollId, optionId);
+      let tx;
+      const sendTokenVoteTx = () => sendTxWithNonceRetry({
+        signer,
+        sendTx: (overrides = {}) => contract.voteInPollWithToken(pollId, optionId, voterAddress, overrides),
+        onRetry: () => setStatus('Nonce conflict detected, retrying vote...')
+      });
+
+      const sendStandardVoteTx = () => sendTxWithNonceRetry({
+        signer,
+        sendTx: (overrides = {}) => contract.voteInPoll(pollId, optionId, overrides),
+        onRetry: () => setStatus('Nonce conflict detected, retrying vote...')
+      });
+
+      if (isTokenRequiredEffective) {
+        tx = await sendTokenVoteTx();
+      } else if (isTokenEnabledEffective) {
+        const canVoteWithToken = await contract.canVoteWithToken(pollId, voterAddress);
+        if (canVoteWithToken) {
+          tx = await sendTokenVoteTx();
+        } else {
+          tx = await sendStandardVoteTx();
+        }
+      } else {
+        try {
+          tx = await sendStandardVoteTx();
+        } catch (standardVoteErr) {
+          const details = getContractErrorDetails(standardVoteErr, contract);
+          const message = details.rawMessage || '';
+          const requiresTokenVoting =
+            details.normalizedCode === 'TOKEN_REQUIRED' ||
+            message.includes('requires token-based voting') ||
+            message.includes('voteInPollWithToken');
+
+          if (!requiresTokenVoting) {
+            throw standardVoteErr;
+          }
+
+          setStatus('This poll requires token-based voting. Retrying with token vote...');
+          tx = await sendTokenVoteTx();
+        }
+      }
+
       setStatus('Waiting for confirmation...');
       await tx.wait();
 
@@ -252,16 +361,8 @@ export default function VoteList({ mode = 'production' }) {
         setPolls(polls.map(p => p.id === pollId ? { ...p, options } : p));
       }
     } catch (err) {
-      const message = err.message || String(err);
-      if (message.includes('already voted')) {
-        setStatus('Error: You have already voted in this poll');
-      } else if (message.includes('Not authorized')) {
-        setStatus('Error: You are not authorized to vote in this poll');
-      } else if (message.includes('Poll time over')) {
-        setStatus('Error: Voting period has ended');
-      } else {
-        setStatus(`Error: ${message}`);
-      }
+      const details = getContractErrorDetails(err, contract);
+      setStatus(`Error: ${details.description}`);
     }
   }
 
@@ -457,26 +558,35 @@ export default function VoteList({ mode = 'production' }) {
             {polls.map(poll => {
               const nowTs = Math.floor(Date.now() / 1000);
               const status = poll.status || { started: true, active: false, ended: poll.ended, revealed: poll.revealed };
-              const isUpcoming = poll.startTime && nowTs < poll.startTime;
-              const isActiveByTime = poll.startTime && poll.endTime && nowTs >= poll.startTime && nowTs < poll.endTime;
-              const isActiveEffective = status.active || isActiveByTime;
+              const hasStartedByTime = poll.startTime ? nowTs >= poll.startTime : true;
+              const hasEndedByTime = poll.endTime ? nowTs >= poll.endTime : false;
+              const isEndedEffective = Boolean(status.ended || hasEndedByTime);
+              const isUpcoming = !isEndedEffective && !hasStartedByTime;
+              const isActiveByTime = hasStartedByTime && !hasEndedByTime;
+              const isActiveEffective = !isEndedEffective && (status.active || isActiveByTime);
+
               const statusLabel = status.revealed
                 ? 'Revealed'
-                : status.ended
+                : isEndedEffective
                 ? 'Ended'
                 : isActiveEffective
                 ? 'Active'
                 : isUpcoming
                 ? 'Scheduled'
-                : 'Expired';
-              const timeLabel = isUpcoming ? formatTimeUntil(poll.startTime) : formatTimeRemaining(poll.endTime);
+                : 'Inactive';
+
+              const timeLabel = isEndedEffective
+                ? 'Voting ended'
+                : isUpcoming
+                ? formatTimeUntil(poll.startTime)
+                : formatTimeRemaining(poll.endTime);
               let statusMessage = '';
 
               if (isUpcoming) {
                 statusMessage = '📅 Poll scheduled - voting not started yet';
               } else if (isActiveEffective) {
                 statusMessage = '✅ Poll active - vote now!';
-              } else if (status.ended && !status.revealed) {
+              } else if (isEndedEffective && !status.revealed) {
                 statusMessage = '⏱️ Poll ended - waiting for results';
               } else if (status.revealed) {
                 statusMessage = '🏆 Results available';
@@ -492,6 +602,16 @@ export default function VoteList({ mode = 'production' }) {
                       <h4 className="poll-title">{poll.title}</h4>
                       <div className="muted small">{timeLabel}</div>
                       {statusMessage && <div className="muted small">{statusMessage}</div>}
+                      {poll.tokenConfig?.enabled && (
+                        <div className="muted small">
+                          {poll.tokenConfig.tokenRequired
+                            ? `🔐 Token vote required (${poll.voterTokenBalance} tokens)`
+                            : `🪙 Token voting enabled (${poll.voterTokenBalance} tokens)`}
+                        </div>
+                      )}
+                      {poll.tokenConfig?.allowGaslessVoting && (
+                        <div className="muted small">⛽ Gasless mode enabled (owner paymaster required)</div>
+                      )}
                     </div>
                     {poll.hasVoted && <span className="chip chip-success">Voted</span>}
                   </div>
@@ -550,7 +670,7 @@ export default function VoteList({ mode = 'production' }) {
                           </div>
                           {!isUpcoming && !poll.hasVoted && isActiveEffective && (
                             <button className="btn" onClick={() => vote(poll.id, option.id)}>
-                              Vote
+                              {poll.tokenConfig?.tokenRequired ? 'Vote with Token' : 'Vote'}
                             </button>
                           )}
                         </div>

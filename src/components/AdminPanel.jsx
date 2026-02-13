@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { getSigner, getContract, getProvider } from '../contract';
+import { getSigner, getContract, getProvider, getContractErrorDetails, sendTxWithNonceRetry } from '../contract';
 import { ethers } from 'ethers';
 
 // Read from env or use hardcoded defaults
@@ -39,6 +39,10 @@ export default function AdminPanel({ mode = 'production' }) {
   const [pollAdmin, setPollAdmin] = useState('');
   const [pollStartTime, setPollStartTime] = useState('');
   const [pollDuration, setPollDuration] = useState('3600'); // 1 hour default
+  const [enableTokenVoting, setEnableTokenVoting] = useState(false);
+  const [requireTokenVoting, setRequireTokenVoting] = useState(false);
+  const [tokensPerVoter, setTokensPerVoter] = useState('1');
+  const [allowGaslessVoting, setAllowGaslessVoting] = useState(false);
 
   // Add candidate form state
   const [selectedPollId, setSelectedPollId] = useState('');
@@ -47,22 +51,56 @@ export default function AdminPanel({ mode = 'production' }) {
   // Add voters form state
   const [voterPollId, setVoterPollId] = useState('');
   const [voterAddresses, setVoterAddresses] = useState('');
+  const [voterTokensPerVoter, setVoterTokensPerVoter] = useState('1');
+  const [topUpPollId, setTopUpPollId] = useState('');
+  const [topUpVoterAddresses, setTopUpVoterAddresses] = useState('');
+  const [topUpAmountPerVoter, setTopUpAmountPerVoter] = useState('1');
+  const [balanceCheckPollId, setBalanceCheckPollId] = useState('');
+  const [balanceCheckVoterAddress, setBalanceCheckVoterAddress] = useState('');
+  const [balanceCheckResult, setBalanceCheckResult] = useState(null);
 
   // Ownership transfer form state
   const [newOwnerAddress, setNewOwnerAddress] = useState('');
+  const [paymasterAddress, setPaymasterAddress] = useState('');
+  const [paymasterStatus, setPaymasterStatus] = useState({
+    configured: false,
+    deployed: false,
+    chainId: null,
+    networkName: 'unknown'
+  });
 
   // Local network state
   const [walletSigner, setWalletSigner] = useState(null);
   const [selectedAccount, setSelectedAccount] = useState(0);
 
-  function parseDateTimeAsUtc(value) {
+  function parseDateTimeLocalToUnix(value) {
     if (!value) return null;
     const [datePart, timePart] = value.split('T');
     if (!datePart || !timePart) return null;
+
     const [year, month, day] = datePart.split('-').map(Number);
     const [hour, minute] = timePart.split(':').map(Number);
     if ([year, month, day, hour, minute].some(Number.isNaN)) return null;
-    return Math.floor(Date.UTC(year, month - 1, day, hour, minute, 0) / 1000);
+
+    const localDate = new Date(year, month - 1, day, hour, minute, 0);
+    if (Number.isNaN(localDate.getTime())) return null;
+    return Math.floor(localDate.getTime() / 1000);
+  }
+
+  function formatUtcDateTime(ts) {
+    if (!ts) return null;
+    return new Date(ts * 1000).toISOString().replace('.000Z', ' UTC').replace('T', ' ');
+  }
+
+  function formatLocalUtcOffset(ts) {
+    if (!ts) return null;
+    const localDate = new Date(ts * 1000);
+    const offsetMinutes = -localDate.getTimezoneOffset();
+    const sign = offsetMinutes >= 0 ? '+' : '-';
+    const absMinutes = Math.abs(offsetMinutes);
+    const hours = String(Math.floor(absMinutes / 60)).padStart(2, '0');
+    const minutes = String(absMinutes % 60).padStart(2, '0');
+    return `UTC${sign}${hours}:${minutes}`;
   }
 
   async function connectWallet() {
@@ -204,6 +242,24 @@ export default function AdminPanel({ mode = 'production' }) {
           const totalVotes = await contract.getTotalVotes(i);
           const endTime = Number(poll.endTime);
           const startTime = Number(poll.startTime);
+          let tokenConfig = {
+            enabled: false,
+            tokenRequired: false,
+            tokensPerVoter: 0,
+            allowGaslessVoting: false
+          };
+
+          try {
+            const rawTokenConfig = await contract.getTokenConfig(i);
+            tokenConfig = {
+              enabled: rawTokenConfig?.enabled ?? rawTokenConfig?.[0] ?? false,
+              tokenRequired: rawTokenConfig?.tokenRequired ?? rawTokenConfig?.[1] ?? false,
+              tokensPerVoter: Number(rawTokenConfig?.tokensPerVoter ?? rawTokenConfig?.[2] ?? 0),
+              allowGaslessVoting: rawTokenConfig?.allowGaslessVoting ?? rawTokenConfig?.[3] ?? false
+            };
+          } catch {
+          }
+
           let status;
 
           try {
@@ -257,6 +313,7 @@ export default function AdminPanel({ mode = 'production' }) {
             ended: status.ended,
             totalVotes: Number(totalVotes),
             optionsCount: Number(optionsCount),
+            tokenConfig,
             status
           });
         } catch (pollErr) {
@@ -289,9 +346,34 @@ export default function AdminPanel({ mode = 'production' }) {
       const contract = getContract(provider);
       const owner = await contract.owner();
       const pending = await contract.pendingOwner();
+      const network = await provider.getNetwork();
+      let paymaster = ethers.ZeroAddress;
+      let nextPaymasterStatus = {
+        configured: false,
+        deployed: false,
+        chainId: Number(network?.chainId),
+        networkName: network?.name || 'unknown'
+      };
+
+      try {
+        paymaster = await contract.votingPaymaster();
+      } catch {
+      }
+
+      if (paymaster && paymaster !== ethers.ZeroAddress) {
+        nextPaymasterStatus.configured = true;
+        try {
+          const code = await provider.getCode(paymaster);
+          nextPaymasterStatus.deployed = code !== '0x' && code !== '0x0';
+        } catch {
+          nextPaymasterStatus.deployed = false;
+        }
+      }
 
       setOwnerAddress(owner);
       setPendingOwner(pending);
+      setPaymasterAddress(paymaster && paymaster !== ethers.ZeroAddress ? paymaster : '');
+      setPaymasterStatus(nextPaymasterStatus);
 
       if (currentAddress) {
         const currentLower = currentAddress.toLowerCase();
@@ -412,7 +494,7 @@ export default function AdminPanel({ mode = 'production' }) {
       const adminAddr = pollAdmin || addr;
       const duration = parseInt(pollDuration);
       const nowTs = Math.floor(Date.now() / 1000);
-      const startTs = pollStartTime ? parseDateTimeAsUtc(pollStartTime) : nowTs;
+      const startTs = pollStartTime ? parseDateTimeLocalToUnix(pollStartTime) : nowTs;
 
       if (!startTs || Number.isNaN(startTs)) {
         setStatus('Error: Invalid start time');
@@ -432,19 +514,40 @@ export default function AdminPanel({ mode = 'production' }) {
         return;
       }
 
+      if (requireTokenVoting && !enableTokenVoting) {
+        setStatus('Error: Token voting must be enabled before it can be required');
+        setLoading(false);
+        return;
+      }
+
+      const parsedTokensPerVoter = Number(tokensPerVoter);
+      if (enableTokenVoting && (!Number.isFinite(parsedTokensPerVoter) || parsedTokensPerVoter < 1)) {
+        setStatus('Error: Tokens per voter must be at least 1 when token voting is enabled');
+        setLoading(false);
+        return;
+      }
+
       setStatus('Testing transaction...');
       
       // STEP 4: Try staticCall
       try {
-        const result = await contract.createPoll.staticCall(pollTitle, adminAddr, startTs, duration);
+        const result = await contract.createPoll.staticCall(
+          pollTitle,
+          adminAddr,
+          startTs,
+          duration,
+          enableTokenVoting,
+          requireTokenVoting
+        );
         console.log('✓ Static call succeeded, will return:', result?.toString());
       } catch (staticErr) {
-        const msg = staticErr.message || String(staticErr);
+        const details = getContractErrorDetails(staticErr, contract);
+        const msg = details.rawMessage || String(staticErr);
         console.error('Static call failed:', staticErr);
         
         if (msg.includes('Ownable') || msg.includes('caller is not the owner')) {
           setStatus(`Error: Only owner can create polls. Owner: ${ownerCheck}, You: ${addr}`);
-        } else if (msg.includes('already exists')) {
+        } else if (msg.includes('already exists') || details.normalizedCode === 'POLL_ALREADY_EXISTS') {
           setStatus('Error: Poll title already exists');
         } else if (msg.includes('missing revert data') || msg.includes('CALL_EXCEPTION')) {
           setStatus('Error: Transaction would fail (check console)');
@@ -453,7 +556,7 @@ export default function AdminPanel({ mode = 'production' }) {
           console.error('- Contract has a require() that fails');
           console.error('- Insufficient gas (unlikely on local)');
         } else {
-          setStatus(`Error: ${msg}`);
+          setStatus(`Error: ${details.description}`);
         }
         setLoading(false);
         return;
@@ -461,7 +564,19 @@ export default function AdminPanel({ mode = 'production' }) {
 
       // STEP 5: Send real transaction
       setStatus('Submitting transaction...');
-      const tx = await contract.createPoll(pollTitle, adminAddr, startTs, duration);
+      const tx = await sendTxWithNonceRetry({
+        signer,
+        sendTx: (overrides = {}) => contract.createPoll(
+          pollTitle,
+          adminAddr,
+          startTs,
+          duration,
+          enableTokenVoting,
+          requireTokenVoting,
+          overrides
+        ),
+        onRetry: () => setStatus('Nonce conflict detected, retrying with latest nonce...')
+      });
       
       setStatus('Waiting for confirmation...');
       const receipt = await tx.wait();
@@ -478,7 +593,28 @@ export default function AdminPanel({ mode = 'production' }) {
       if (event) {
         const parsed = contract.interface.parseLog(event);
         const pollId = parsed.args[0];
-        setStatus(`✅ Poll created! ID: ${pollId}`);
+        if (enableTokenVoting) {
+          setStatus('Configuring token voting...');
+          const configureTx = await sendTxWithNonceRetry({
+            signer,
+            sendTx: (overrides = {}) => contract.configureTokenVoting(
+              pollId,
+              true,
+              requireTokenVoting,
+              parsedTokensPerVoter,
+              allowGaslessVoting,
+              overrides
+            ),
+            onRetry: () => setStatus('Nonce conflict detected, retrying token config...')
+          });
+          await configureTx.wait();
+        }
+
+        setStatus(
+          enableTokenVoting
+            ? `✅ Poll created and token voting configured! ID: ${pollId}`
+            : `✅ Poll created! ID: ${pollId}`
+        );
       } else {
         setStatus('✅ Poll created successfully!');
       }
@@ -487,16 +623,21 @@ export default function AdminPanel({ mode = 'production' }) {
       setPollAdmin('');
       setPollStartTime('');
       setPollDuration('3600');
+      setEnableTokenVoting(false);
+      setRequireTokenVoting(false);
+      setTokensPerVoter('1');
+      setAllowGaslessVoting(false);
       await loadPolls();
       
     } catch (err) {
       console.error('Create poll error:', err);
-      const message = err.message || String(err);
+      const details = getContractErrorDetails(err);
+      const message = details.rawMessage || String(err);
       
       if (message.includes('missing revert data') || message.includes('CALL_EXCEPTION')) {
         setStatus('❌ Transaction failed - See console for fix instructions');
       } else {
-        setStatus(`Error: ${message}`);
+        setStatus(`Error: ${details.description}`);
       }
     } finally {
       setLoading(false);
@@ -519,7 +660,11 @@ export default function AdminPanel({ mode = 'production' }) {
       const contract = getContract(signer);
 
       setStatus('Adding candidate...');
-      const tx = await contract.addOptionToPoll(selectedPollId, candidateName);
+      const tx = await sendTxWithNonceRetry({
+        signer,
+        sendTx: (overrides = {}) => contract.addOptionToPoll(selectedPollId, candidateName, overrides),
+        onRetry: () => setStatus('Nonce conflict detected, retrying add candidate...')
+      });
       setStatus('Waiting for confirmation...');
       await tx.wait();
 
@@ -553,27 +698,154 @@ export default function AdminPanel({ mode = 'production' }) {
         .map(addr => addr.trim())
         .filter(addr => addr.length > 0);
 
+      const selectedPoll = polls.find(p => String(p.id) === String(voterPollId));
+      const tokenConfig = selectedPoll?.tokenConfig;
+      const shouldAllocateTokens = Boolean(tokenConfig?.enabled);
+
+      const parsedVoterTokens = Number(voterTokensPerVoter);
+      const tokensForThisBatch = tokenConfig?.tokensPerVoter > 0
+        ? tokenConfig.tokensPerVoter
+        : parsedVoterTokens;
+
       if (addresses.length === 0) {
         setStatus('No valid addresses provided');
         setLoading(false);
         return;
       }
 
-      setStatus(`Adding ${addresses.length} voter(s)...`);
-
-      if (addresses.length === 1) {
-        const tx = await contract.addVoter(voterPollId, addresses[0]);
-        await tx.wait();
-      } else {
-        const tx = await contract.addVoters(voterPollId, addresses);
-        await tx.wait();
+      if (shouldAllocateTokens && (!Number.isFinite(tokensForThisBatch) || tokensForThisBatch < 1)) {
+        setStatus('Error: Tokens per voter must be at least 1 for token-enabled polls');
+        setLoading(false);
+        return;
       }
 
-      setStatus(`${addresses.length} voter(s) added successfully!`);
+      setStatus(`Adding ${addresses.length} voter(s)...`);
+
+      if (shouldAllocateTokens) {
+        const tx = await sendTxWithNonceRetry({
+          signer,
+          sendTx: (overrides = {}) => contract.addVotersWithTokens(voterPollId, addresses, tokensForThisBatch, overrides),
+          onRetry: () => setStatus('Nonce conflict detected, retrying add voters with tokens...')
+        });
+        await tx.wait();
+      } else {
+        if (addresses.length === 1) {
+          const tx = await sendTxWithNonceRetry({
+            signer,
+            sendTx: (overrides = {}) => contract.addVoter(voterPollId, addresses[0], overrides),
+            onRetry: () => setStatus('Nonce conflict detected, retrying add voter...')
+          });
+          await tx.wait();
+        } else {
+          const tx = await sendTxWithNonceRetry({
+            signer,
+            sendTx: (overrides = {}) => contract.addVoters(voterPollId, addresses, overrides),
+            onRetry: () => setStatus('Nonce conflict detected, retrying add voters...')
+          });
+          await tx.wait();
+        }
+      }
+
+      setStatus(
+        shouldAllocateTokens
+          ? `${addresses.length} voter(s) added with ${tokensForThisBatch} token(s) each!`
+          : `${addresses.length} voter(s) added successfully!`
+      );
       setVoterAddresses('');
       await loadPolls();
     } catch (err) {
       setStatus(`Error: ${err.message || err}`);
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function topUpVotingTokens(e) {
+    e.preventDefault();
+    setStatus(null);
+    setLoading(true);
+
+    try {
+      if (!topUpPollId || !topUpVoterAddresses) {
+        setStatus('Please select a poll and enter voter addresses for token top-up');
+        setLoading(false);
+        return;
+      }
+
+      const amount = Number(topUpAmountPerVoter);
+      if (!Number.isFinite(amount) || amount < 1) {
+        setStatus('Error: Top-up amount per voter must be at least 1');
+        setLoading(false);
+        return;
+      }
+
+      const signer = walletSigner || await getSigner();
+      const contract = getContract(signer);
+
+      const addresses = topUpVoterAddresses
+        .split(',')
+        .map(address => address.trim())
+        .filter(address => address.length > 0);
+
+      if (addresses.length === 0) {
+        setStatus('No valid addresses provided for top-up');
+        setLoading(false);
+        return;
+      }
+
+      const amounts = addresses.map(() => amount);
+
+      setStatus(`Allocating ${amount} token(s) each to ${addresses.length} voter(s)...`);
+      const tx = await sendTxWithNonceRetry({
+        signer,
+        sendTx: (overrides = {}) => contract.allocateVotingTokens(topUpPollId, addresses, amounts, overrides),
+        onRetry: () => setStatus('Nonce conflict detected, retrying token top-up...')
+      });
+      await tx.wait();
+
+      setStatus(`✅ Top-up successful: ${amount} token(s) allocated to ${addresses.length} voter(s).`);
+      setTopUpVoterAddresses('');
+      await loadPolls();
+    } catch (err) {
+      const details = getContractErrorDetails(err);
+      setStatus(`Error: ${details.description}`);
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function checkVoterTokenBalance(e) {
+    e.preventDefault();
+    setStatus(null);
+    setLoading(true);
+
+    try {
+      if (!balanceCheckPollId || !balanceCheckVoterAddress) {
+        setStatus('Please select a poll and enter a voter address to check balance');
+        setLoading(false);
+        return;
+      }
+
+      if (!ethers.isAddress(balanceCheckVoterAddress)) {
+        setStatus('Error: Invalid voter address for balance check');
+        setLoading(false);
+        return;
+      }
+
+      const provider = getProvider();
+      const contract = getContract(provider);
+      const balance = await contract.getVoterTokenBalance(balanceCheckPollId, balanceCheckVoterAddress);
+
+      setBalanceCheckResult({
+        pollId: balanceCheckPollId,
+        voter: balanceCheckVoterAddress,
+        balance: Number(balance)
+      });
+      setStatus(`Token balance loaded for ${balanceCheckVoterAddress}`);
+    } catch (err) {
+      const details = getContractErrorDetails(err);
+      setStatus(`Error: ${details.description}`);
+      setBalanceCheckResult(null);
     } finally {
       setLoading(false);
     }
@@ -595,7 +867,11 @@ export default function AdminPanel({ mode = 'production' }) {
       const contract = getContract(signer);
 
       setStatus('Starting ownership transfer...');
-      const tx = await contract.transferOwnership(newOwnerAddress);
+      const tx = await sendTxWithNonceRetry({
+        signer,
+        sendTx: (overrides = {}) => contract.transferOwnership(newOwnerAddress, overrides),
+        onRetry: () => setStatus('Nonce conflict detected, retrying ownership transfer...')
+      });
       setStatus('Waiting for confirmation...');
       await tx.wait();
 
@@ -618,7 +894,11 @@ export default function AdminPanel({ mode = 'production' }) {
       const contract = getContract(signer);
 
       setStatus('Canceling ownership transfer...');
-      const tx = await contract.cancelOwnershipTransfer();
+      const tx = await sendTxWithNonceRetry({
+        signer,
+        sendTx: (overrides = {}) => contract.cancelOwnershipTransfer(overrides),
+        onRetry: () => setStatus('Nonce conflict detected, retrying cancel transfer...')
+      });
       setStatus('Waiting for confirmation...');
       await tx.wait();
 
@@ -640,7 +920,11 @@ export default function AdminPanel({ mode = 'production' }) {
       const contract = getContract(signer);
 
       setStatus('Accepting ownership...');
-      const tx = await contract.acceptOwnership();
+      const tx = await sendTxWithNonceRetry({
+        signer,
+        sendTx: (overrides = {}) => contract.acceptOwnership(overrides),
+        onRetry: () => setStatus('Nonce conflict detected, retrying accept ownership...')
+      });
       setStatus('Waiting for confirmation...');
       await tx.wait();
 
@@ -649,6 +933,40 @@ export default function AdminPanel({ mode = 'production' }) {
       await loadPolls();
     } catch (err) {
       setStatus(`Error: ${err.message || err}`);
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function setVotingPaymaster(e) {
+    e.preventDefault();
+    setStatus(null);
+    setLoading(true);
+
+    try {
+      if (!paymasterAddress || !ethers.isAddress(paymasterAddress)) {
+        setStatus('Error: Invalid paymaster address');
+        setLoading(false);
+        return;
+      }
+
+      const signer = walletSigner || await getSigner();
+      const contract = getContract(signer);
+
+      setStatus('Setting voting paymaster...');
+      const tx = await sendTxWithNonceRetry({
+        signer,
+        sendTx: (overrides = {}) => contract.setVotingPaymaster(paymasterAddress, overrides),
+        onRetry: () => setStatus('Nonce conflict detected, retrying set paymaster...')
+      });
+      await tx.wait();
+
+      setStatus('Voting paymaster set successfully. Gasless token voting can now be sponsored by this paymaster.');
+      await loadOwnership(addr);
+      await loadPolls();
+    } catch (err) {
+      const details = getContractErrorDetails(err);
+      setStatus(`Error: ${details.description}`);
     } finally {
       setLoading(false);
     }
@@ -663,7 +981,11 @@ export default function AdminPanel({ mode = 'production' }) {
       const contract = getContract(signer);
 
       setStatus('Revealing results...');
-      const tx = await contract.revealResults(pollId);
+      const tx = await sendTxWithNonceRetry({
+        signer,
+        sendTx: (overrides = {}) => contract.revealResults(pollId, overrides),
+        onRetry: () => setStatus('Nonce conflict detected, retrying reveal...')
+      });
       await tx.wait();
 
       setStatus('Results revealed successfully!');
@@ -684,7 +1006,11 @@ export default function AdminPanel({ mode = 'production' }) {
       const contract = getContract(signer);
 
       setStatus('Ending poll...');
-      const tx = await contract.endPoll(pollId);
+      const tx = await sendTxWithNonceRetry({
+        signer,
+        sendTx: (overrides = {}) => contract.endPoll(pollId, overrides),
+        onRetry: () => setStatus('Nonce conflict detected, retrying end poll...')
+      });
       await tx.wait();
 
       setStatus('Poll ended successfully!');
@@ -785,6 +1111,10 @@ export default function AdminPanel({ mode = 'production' }) {
     if (!time) return 'Not set';
     return new Date(time * 1000).toLocaleString();
   };
+
+  const previewStartTs = pollStartTime ? parseDateTimeLocalToUnix(pollStartTime) : null;
+  const previewStartUtc = previewStartTs ? formatUtcDateTime(previewStartTs) : null;
+  const previewStartOffset = previewStartTs ? formatLocalUtcOffset(previewStartTs) : null;
 
   const voterPath = mode === 'local' ? '/local/voter' : '/voter';
 
@@ -913,7 +1243,14 @@ export default function AdminPanel({ mode = 'production' }) {
                 onChange={e => setPollStartTime(e.target.value)}
                 className="form-input"
               />
-              <div className="muted small">Leave blank to start immediately. Time is interpreted as UTC.</div>
+              <div className="muted small">Leave blank to start immediately. Selected time is your local time and will be converted to UTC automatically.</div>
+              {pollStartTime && (
+                <div className="muted small">
+                  You selected local time: {previewStartTs ? new Date(previewStartTs * 1000).toLocaleString() : 'Invalid date'}
+                  {previewStartOffset ? ` (${previewStartOffset})` : ''}
+                  {previewStartUtc ? ` → submitted as UTC: ${previewStartUtc}` : ''}
+                </div>
+              )}
               <input
                 type="number"
                 placeholder="Duration (seconds)"
@@ -922,8 +1259,113 @@ export default function AdminPanel({ mode = 'production' }) {
                 className="form-input"
               />
               <div className="muted small">Suggested: 300 (5 min), 3600 (1 hour), 86400 (1 day)</div>
+              <label className="muted small" style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                <input
+                  type="checkbox"
+                  checked={enableTokenVoting}
+                  onChange={e => {
+                    const enabled = e.target.checked;
+                    setEnableTokenVoting(enabled);
+                    if (!enabled) {
+                      setRequireTokenVoting(false);
+                    }
+                  }}
+                />
+                Enable token voting for this poll
+              </label>
+              <label className="muted small" style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                <input
+                  type="checkbox"
+                  checked={requireTokenVoting}
+                  disabled={!enableTokenVoting}
+                  onChange={e => {
+                    const required = e.target.checked;
+                    setRequireTokenVoting(required);
+                    if (required) {
+                      setEnableTokenVoting(true);
+                    }
+                  }}
+                />
+                Require token voting (voters must spend voting tokens)
+              </label>
+              <input
+                type="number"
+                min="1"
+                placeholder="Tokens per voter"
+                value={tokensPerVoter}
+                onChange={e => setTokensPerVoter(e.target.value)}
+                className="form-input"
+                disabled={!enableTokenVoting}
+              />
+              <label className="muted small" style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                <input
+                  type="checkbox"
+                  checked={allowGaslessVoting}
+                  disabled={!enableTokenVoting}
+                  onChange={e => setAllowGaslessVoting(e.target.checked)}
+                />
+                Allow gasless token voting (requires owner to set a paymaster)
+              </label>
               <button type="submit" className="btn" disabled={loading}>
                 {loading ? 'Creating...' : 'Create Poll'}
+              </button>
+            </form>
+          </section>
+        )}
+
+        {addr && isOwner && (
+          <section className="panel-card">
+            <div className="panel-head">
+              <h3>Gas Sponsorship</h3>
+              <span className="chip">Owner only</span>
+            </div>
+            <div className="meta-list">
+              <div>
+                <span>Paymaster status</span>
+                <strong>
+                  <span
+                    className={`chip ${
+                      paymasterStatus.configured
+                        ? paymasterStatus.deployed
+                          ? 'chip-success'
+                          : 'chip-warning'
+                        : ''
+                    }`}
+                  >
+                    {!paymasterStatus.configured
+                      ? 'Not configured'
+                      : paymasterStatus.deployed
+                      ? 'Configured & active'
+                      : 'Configured but contract not deployed'}
+                  </span>
+                </strong>
+              </div>
+              <div>
+                <span>Network</span>
+                <strong>
+                  {paymasterStatus.networkName}
+                  {Number.isFinite(paymasterStatus.chainId) ? ` (${paymasterStatus.chainId})` : ''}
+                </strong>
+              </div>
+            </div>
+            <form onSubmit={setVotingPaymaster} className="form-stack">
+              <input
+                type="text"
+                placeholder="Voting Paymaster Address"
+                value={paymasterAddress}
+                onChange={e => setPaymasterAddress(e.target.value)}
+                className="form-input"
+              />
+              <div className="muted small">
+                Set this to enable sponsor-paid gas for polls configured with "Allow gasless token voting".
+              </div>
+              {paymasterStatus.configured && !paymasterStatus.deployed && (
+                <div className="muted small">
+                  Warning: this paymaster address has no contract code on the current network.
+                </div>
+              )}
+              <button type="submit" className="btn" disabled={loading}>
+                {loading ? 'Saving...' : 'Set Voting Paymaster'}
               </button>
             </form>
           </section>
@@ -986,6 +1428,29 @@ export default function AdminPanel({ mode = 'production' }) {
                 rows={4}
                 className="form-input form-textarea"
               />
+              {voterPollId && (() => {
+                const selectedPoll = polls.find(p => String(p.id) === String(voterPollId));
+                if (!selectedPoll?.tokenConfig?.enabled) return null;
+
+                return (
+                  <>
+                    <div className="muted small">
+                      Token voting enabled for this poll.
+                      {selectedPoll.tokenConfig.tokenRequired ? ' Token vote is required.' : ' Token vote is optional.'}
+                      {' '}Configured tokens per voter: {selectedPoll.tokenConfig.tokensPerVoter || 0}
+                      {selectedPoll.tokenConfig.allowGaslessVoting ? ' • Gasless enabled' : ''}
+                    </div>
+                    <input
+                      type="number"
+                      min="1"
+                      placeholder="Fallback tokens per voter"
+                      value={voterTokensPerVoter}
+                      onChange={e => setVoterTokensPerVoter(e.target.value)}
+                      className="form-input"
+                    />
+                  </>
+                );
+              })()}
               {mode === 'local' && (
                 <button
                   type="button"
@@ -1001,6 +1466,77 @@ export default function AdminPanel({ mode = 'production' }) {
             </form>
           </section>
         )}
+
+        {addr && isOwner && polls.length > 0 && (
+          <section className="panel-card">
+            <div className="panel-head">
+              <h3>Top Up Tokens</h3>
+            </div>
+            <form onSubmit={topUpVotingTokens} className="form-stack">
+              <select
+                value={topUpPollId}
+                onChange={e => setTopUpPollId(e.target.value)}
+                className="form-input"
+              >
+                <option value="">Select Poll</option>
+                {polls.filter(p => !p.ended).map(poll => (
+                  <option key={poll.id} value={poll.id}>
+                    Poll #{poll.id}: {poll.title}
+                  </option>
+                ))}
+              </select>
+              <textarea
+                placeholder="Voter Addresses (comma-separated)"
+                value={topUpVoterAddresses}
+                onChange={e => setTopUpVoterAddresses(e.target.value)}
+                rows={4}
+                className="form-input form-textarea"
+              />
+              <input
+                type="number"
+                min="1"
+                placeholder="Top-up tokens per voter"
+                value={topUpAmountPerVoter}
+                onChange={e => setTopUpAmountPerVoter(e.target.value)}
+                className="form-input"
+              />
+              <button type="submit" className="btn" disabled={loading}>
+                {loading ? 'Topping Up...' : 'Top Up Tokens'}
+              </button>
+            </form>
+
+            <form onSubmit={checkVoterTokenBalance} className="form-stack" style={{ marginTop: 14 }}>
+              <select
+                value={balanceCheckPollId}
+                onChange={e => setBalanceCheckPollId(e.target.value)}
+                className="form-input"
+              >
+                <option value="">Select Poll (Balance Check)</option>
+                {polls.map(poll => (
+                  <option key={poll.id} value={poll.id}>
+                    Poll #{poll.id}: {poll.title}
+                  </option>
+                ))}
+              </select>
+              <input
+                type="text"
+                placeholder="Voter Address for balance check"
+                value={balanceCheckVoterAddress}
+                onChange={e => setBalanceCheckVoterAddress(e.target.value)}
+                className="form-input"
+              />
+              <button type="submit" className="btn secondary" disabled={loading}>
+                {loading ? 'Checking...' : 'Check Token Balance'}
+              </button>
+            </form>
+
+            {balanceCheckResult && (
+              <div className="muted small" style={{ marginTop: 10 }}>
+                Poll #{balanceCheckResult.pollId} • {balanceCheckResult.voter} • Token balance: {balanceCheckResult.balance}
+              </div>
+            )}
+          </section>
+        )}
       </div>
 
       {addr && isOwner && polls.length > 0 && (
@@ -1012,17 +1548,31 @@ export default function AdminPanel({ mode = 'production' }) {
             {polls.map(poll => {
               const nowTs = Math.floor(Date.now() / 1000);
               const status = poll.status || { started: true, active: false, ended: poll.ended, revealed: poll.revealed };
-              const isUpcoming = !status.started && poll.startTime && nowTs < poll.startTime;
+              const hasStartedByTime = poll.startTime ? nowTs >= poll.startTime : true;
+              const hasEndedByTime = poll.endTime ? nowTs >= poll.endTime : false;
+              const isEndedEffective = Boolean(status.ended || hasEndedByTime);
+              const isUpcoming = !isEndedEffective && !hasStartedByTime;
+              const isActiveEffective = !isEndedEffective && (status.active || (hasStartedByTime && !hasEndedByTime));
+              const isPaymasterActive = paymasterStatus.configured && paymasterStatus.deployed;
+              const gaslessStatus = poll.tokenConfig?.allowGaslessVoting
+                ? isPaymasterActive
+                  ? 'Ready'
+                  : 'Not ready'
+                : 'Disabled';
               const statusLabel = status.revealed
                 ? 'Revealed'
-                : status.ended
+                : isEndedEffective
                 ? 'Ended'
-                : status.active
+                : isActiveEffective
                 ? 'Active'
                 : isUpcoming
                 ? 'Scheduled'
-                : 'Expired';
-              const timeLabel = isUpcoming ? formatTimeUntil(poll.startTime) : formatTimeRemaining(poll.endTime);
+                : 'Inactive';
+              const timeLabel = isEndedEffective
+                ? 'Ended'
+                : isUpcoming
+                ? formatTimeUntil(poll.startTime)
+                : formatTimeRemaining(poll.endTime);
 
               return (
                 <div
@@ -1063,6 +1613,22 @@ export default function AdminPanel({ mode = 'production' }) {
                       <span>Results</span>
                       <strong>{poll.revealed ? 'Revealed' : 'Hidden'}</strong>
                     </div>
+                    <div>
+                      <span>Gasless</span>
+                      <strong>
+                        <span
+                          className={`chip ${
+                            gaslessStatus === 'Ready'
+                              ? 'chip-success'
+                              : gaslessStatus === 'Not ready'
+                              ? 'chip-warning'
+                              : ''
+                          }`}
+                        >
+                          {gaslessStatus}
+                        </span>
+                      </strong>
+                    </div>
                   </div>
                   <div className="poll-actions">
                     <button
@@ -1071,7 +1637,7 @@ export default function AdminPanel({ mode = 'production' }) {
                     >
                       {expandedPoll === poll.id ? 'Hide Details' : 'Show Details'}
                     </button>
-                    {status.ended && !status.revealed && (
+                    {isEndedEffective && !status.revealed && (
                       <button
                         className="btn"
                         onClick={() => revealResults(poll.id)}
@@ -1080,7 +1646,7 @@ export default function AdminPanel({ mode = 'production' }) {
                         Reveal Results
                       </button>
                     )}
-                    {status.active && (
+                    {isActiveEffective && (
                       <button
                         className="btn"
                         onClick={() => endPoll(poll.id)}
