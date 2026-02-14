@@ -1,6 +1,8 @@
-import React, { useState, useEffect } from 'react';
-import { getSigner, getContract, getProvider, getContractErrorDetails, sendTxWithNonceRetry } from '../contract';
+import React, { useState, useEffect, useMemo } from 'react';
+import { getSigner, getContract, getProvider, getContractErrorDetails, sendTxWithNonceRetry, getSecretBallotManagerContract, getFranchiseManagerContract } from '../contract';
 import { ethers } from 'ethers';
+import Pagination from './Pagination';
+import SearchBar from './SearchBar';
 
 // Read from env or use hardcoded defaults
 const DEFAULT_ACCOUNTS = [
@@ -23,7 +25,7 @@ try {
   console.warn('Failed to parse REACT_APP_HARDHAT_ACCOUNTS, using defaults:', e.message);
 }
 
-export default function AdminPanel({ mode = 'production' }) {
+export default function AdminPanel({ mode = 'production', role }) {
   const [addr, setAddr] = useState(null);
   const [status, setStatus] = useState(null);
   const [loading, setLoading] = useState(false);
@@ -43,6 +45,10 @@ export default function AdminPanel({ mode = 'production' }) {
   const [requireTokenVoting, setRequireTokenVoting] = useState(false);
   const [tokensPerVoter, setTokensPerVoter] = useState('1');
   const [allowGaslessVoting, setAllowGaslessVoting] = useState(false);
+
+  // Per-poll custom manager addresses (advanced)
+  const [customTokenManager, setCustomTokenManager] = useState('');
+  const [customVotingPaymaster, setCustomVotingPaymaster] = useState('');
 
   // Add candidate form state
   const [selectedPollId, setSelectedPollId] = useState('');
@@ -72,6 +78,102 @@ export default function AdminPanel({ mode = 'production' }) {
   // Local network state
   const [walletSigner, setWalletSigner] = useState(null);
   const [selectedAccount, setSelectedAccount] = useState(0);
+
+  // Secret ballot / Quadratic / Multi-choice per-poll state
+  const [secretBallotPollId, setSecretBallotPollId] = useState('');
+  const [revealDurationMinutes, setRevealDurationMinutes] = useState('60');
+  const [quadraticPollId, setQuadraticPollId] = useState('');
+  const [multiChoicePollId, setMultiChoicePollId] = useState('');
+  const [maxChoices, setMaxChoices] = useState('3');
+  const [metadataPollId, setMetadataPollId] = useState('');
+  const [metadataURI, setMetadataURI] = useState('');
+  const [removeVoterPollId, setRemoveVoterPollId] = useState('');
+  const [removeVoterAddress, setRemoveVoterAddress] = useState('');
+  const [sbmAddress, setSbmAddress] = useState('');
+  const [tokenMgrAddress, setTokenMgrAddress] = useState('');
+  const [infraLocked, setInfraLocked] = useState(false);
+
+  // Franchise state
+  const [franchises, setFranchises] = useState([]);
+  const [grantFranchisee, setGrantFranchisee] = useState('');
+  const [grantDuration, setGrantDuration] = useState('2592000'); // 30 days
+  const [grantMaxPolls, setGrantMaxPolls] = useState('10');
+  const [grantFeePerPoll, setGrantFeePerPoll] = useState('0');
+  const [grantPaymaster, setGrantPaymaster] = useState('');
+  const [transferFee, setTransferFee] = useState('0');
+  const [newTransferFee, setNewTransferFee] = useState('');
+  const [fmBalance, setFmBalance] = useState('0');
+  const [franchiseManagerAddr, setFranchiseManagerAddr] = useState('');
+  const [addPollsFranchiseId, setAddPollsFranchiseId] = useState('');
+  const [addPollsCount, setAddPollsCount] = useState('');
+  const [fmAddrInput, setFmAddrInput] = useState('');
+  // Franchisee-specific state
+  const [isFranchisee, setIsFranchisee] = useState(false);
+  const [myFranchiseId, setMyFranchiseId] = useState(0);
+  const [myFranchise, setMyFranchise] = useState(null);
+  const [fpTitle, setFpTitle] = useState('');
+  const [fpStartTime, setFpStartTime] = useState('');
+  const [fpDuration, setFpDuration] = useState('3600');
+  const [fpEnableToken, setFpEnableToken] = useState(false);
+  const [fpRequireToken, setFpRequireToken] = useState(false);
+  const [transferToAddress, setTransferToAddress] = useState('');
+
+  // Search, pagination, and duplicate name checking state
+  const [dashboardSearch, setDashboardSearch] = useState('');
+  const [dashboardFilter, setDashboardFilter] = useState('all'); // all | active | ended | revealed
+  const [dashboardPage, setDashboardPage] = useState(1);
+  const [dashboardPageSize, setDashboardPageSize] = useState(10);
+  const [franchiseSearch, setFranchiseSearch] = useState('');
+  const [franchisePage, setFranchisePage] = useState(1);
+  const [franchisePageSize, setFranchisePageSize] = useState(10);
+  const [existingPollNames, setExistingPollNames] = useState([]);
+  const [titleDuplicateWarning, setTitleDuplicateWarning] = useState('');
+  const [fpTitleDuplicateWarning, setFpTitleDuplicateWarning] = useState('');
+
+  // ─── Load existing poll names for duplicate prevention ──────────────────
+  async function loadExistingPollNames(explicitProvider) {
+    try {
+      const provider = getEffectiveProvider ? getEffectiveProvider(explicitProvider) : (explicitProvider || getProvider());
+      const contract = getContract(provider);
+      let pollsCount = 0;
+      try { pollsCount = Number(await contract.getPollsCount()); } catch {
+        try { pollsCount = Number(await contract.pollsCount()); } catch { return; }
+      }
+      const names = [];
+      for (let i = 1; i <= pollsCount; i++) {
+        try {
+          const poll = await contract.polls(i);
+          if (poll && poll.title) names.push(poll.title);
+        } catch { }
+      }
+      setExistingPollNames(names);
+    } catch (err) {
+      console.warn('Could not load existing poll names:', err.message);
+    }
+  }
+
+  // Check title for duplicates using on-chain pollTitles mapping + local cache
+  async function checkTitleDuplicate(title, setWarningFn) {
+    if (!title || !title.trim()) { setWarningFn(''); return; }
+    const trimmed = title.trim();
+    // Fast local check first
+    const localMatch = existingPollNames.find(n => n.toLowerCase() === trimmed.toLowerCase());
+    if (localMatch) {
+      setWarningFn(`"${localMatch}" already exists. The contract will reject duplicate titles.`);
+      return;
+    }
+    // Also try the on-chain pollTitles(string) mapping for definitive answer
+    try {
+      const provider = getEffectiveProvider ? getEffectiveProvider() : getProvider();
+      const contract = getContract(provider);
+      const exists = await contract.pollTitles(trimmed);
+      if (exists) {
+        setWarningFn(`"${trimmed}" already exists on-chain. Choose a different title.`);
+        return;
+      }
+    } catch { /* pollTitles not available, rely on local cache */ }
+    setWarningFn('');
+  }
 
   function parseDateTimeLocalToUnix(value) {
     if (!value) return null;
@@ -147,11 +249,12 @@ export default function AdminPanel({ mode = 'production' }) {
       setStatus(`Connected with ${account.name}: ${address}`);
 
       try {
+        // Pass wallet.provider explicitly since walletSigner state hasn't updated yet
         const contract = getContract(wallet);
         const owner = await contract.owner();
         setIsOwner(owner.toLowerCase() === address.toLowerCase());
-        await loadOwnership(address);
-        await loadPolls();
+        await loadOwnership(address, wallet.provider);
+        await loadPolls(wallet.provider);
       } catch (contractErr) {
         setIsOwner(false);
         if (contractErr.message.includes('owner') || contractErr.message.includes('not a function')) {
@@ -170,10 +273,16 @@ export default function AdminPanel({ mode = 'production' }) {
     }
   }
 
-  async function loadPolls() {
+  // Use local wallet signer's provider when available (avoids MetaMask intercepting calls in local mode)
+  // Accept an optional explicit provider to avoid stale React state during connect flows.
+  function getEffectiveProvider(explicitProvider) {
+    return explicitProvider || walletSigner?.provider || getProvider();
+  }
+
+  async function loadPolls(explicitProvider) {
     console.log('🔄 loadPolls() called...');
     try {
-      const provider = getProvider();
+      const provider = getEffectiveProvider(explicitProvider);
       const contract = getContract(provider);
       const nowTs = Math.floor(Date.now() / 1000);
       console.log('Contract address:', contract.target);
@@ -196,11 +305,11 @@ export default function AdminPanel({ mode = 'production' }) {
         } else {
           // Try alternative function names
           try {
-            const result = await contract.getPollsCount();
+            const result = await contract.pollsCount();
             pollsCount = Number(result);
           } catch (e2) {
             try {
-              const result = await contract.getPollsCount();
+              const result = await contract.pollCount();
               pollsCount = Number(result);
             } catch (e3) {
               console.error('Cannot read pollsCount from contract');
@@ -316,6 +425,19 @@ export default function AdminPanel({ mode = 'production' }) {
             tokenConfig,
             status
           });
+
+          // Augment with new feature flags (best-effort)
+          const lastPoll = pollsData[pollsData.length - 1];
+          try { lastPoll.isSecretBallot = await contract.secretBallot(i); } catch { lastPoll.isSecretBallot = false; }
+          if (lastPoll.isSecretBallot) {
+            try {
+              const sbm = getSecretBallotManagerContract(provider);
+              lastPoll.revealDuration = Number(await sbm.getRevealDuration(i));
+            } catch { lastPoll.revealDuration = 3600; }
+          }
+          try { lastPoll.quadraticEnabled = await contract.quadraticVotingEnabled(i); } catch { lastPoll.quadraticEnabled = false; }
+          try { lastPoll.maxChoices = Number(await contract.pollMaxChoices(i)); } catch { lastPoll.maxChoices = 0; }
+          try { lastPoll.metadataURI = await contract.getPollMetadata(i); } catch { lastPoll.metadataURI = ''; }
         } catch (pollErr) {
           console.warn(`Failed to load poll #${i}:`, pollErr.message);
           // Continue to next poll
@@ -324,6 +446,7 @@ export default function AdminPanel({ mode = 'production' }) {
 
       console.log('📦 Setting polls state with', pollsData.length, 'polls:', pollsData);
       setPolls(pollsData);
+      setExistingPollNames(pollsData.map(p => p.title));
       console.log('✅ Polls state updated');
 
       if (pollsCount === 0) {
@@ -340,9 +463,9 @@ export default function AdminPanel({ mode = 'production' }) {
     }
   }
 
-  async function loadOwnership(currentAddress) {
+  async function loadOwnership(currentAddress, explicitProvider) {
     try {
-      const provider = getProvider();
+      const provider = getEffectiveProvider(explicitProvider);
       const contract = getContract(provider);
       const owner = await contract.owner();
       const pending = await contract.pendingOwner();
@@ -375,6 +498,28 @@ export default function AdminPanel({ mode = 'production' }) {
       setPaymasterAddress(paymaster && paymaster !== ethers.ZeroAddress ? paymaster : '');
       setPaymasterStatus(nextPaymasterStatus);
 
+      // Load infrastructure lock status
+      try {
+        const locked = await contract.infrastructureLocked();
+        setInfraLocked(locked);
+      } catch { }
+
+      // Load current SBM address
+      try {
+        const currentSbm = await contract.secretBallotMgr();
+        if (currentSbm && currentSbm !== ethers.ZeroAddress) {
+          setSbmAddress(currentSbm);
+        }
+      } catch { }
+
+      // Load current TokenManager address
+      try {
+        const currentTm = await contract.tokenManager();
+        if (currentTm && currentTm !== ethers.ZeroAddress) {
+          setTokenMgrAddress(currentTm);
+        }
+      } catch { }
+
       if (currentAddress) {
         const currentLower = currentAddress.toLowerCase();
         setIsOwner(owner.toLowerCase() === currentLower);
@@ -391,7 +536,7 @@ export default function AdminPanel({ mode = 'production' }) {
 
   async function loadPollDetails(pollId) {
     try {
-      const provider = getProvider();
+      const provider = getEffectiveProvider();
       const contract = getContract(provider);
       const poll = await contract.polls(pollId);
       const optionsCount = await contract.getOptionsCount(pollId);
@@ -494,12 +639,21 @@ export default function AdminPanel({ mode = 'production' }) {
       const adminAddr = pollAdmin || addr;
       const duration = parseInt(pollDuration);
       const nowTs = Math.floor(Date.now() / 1000);
-      const startTs = pollStartTime ? parseDateTimeLocalToUnix(pollStartTime) : nowTs;
+      // Contract requires start time to be in the future
+      // Local mode: 15s buffer for quick testing; Production: 60s buffer
+      const defaultBuffer = mode === 'local' ? 15 : 60;
+      let startTs = pollStartTime ? parseDateTimeLocalToUnix(pollStartTime) : (nowTs + defaultBuffer);
 
       if (!startTs || Number.isNaN(startTs)) {
         setStatus('Error: Invalid start time');
         setLoading(false);
         return;
+      }
+
+      // Ensure start time is at least a few seconds in the future (contract requirement)
+      if (startTs <= nowTs + 5) {
+        startTs = nowTs + defaultBuffer;
+        console.log('Start time adjusted to', startTs, `(now + ${defaultBuffer}s) to meet contract requirement`);
       }
 
       if (!ethers.isAddress(adminAddr)) {
@@ -537,7 +691,9 @@ export default function AdminPanel({ mode = 'production' }) {
           startTs,
           duration,
           enableTokenVoting,
-          requireTokenVoting
+          requireTokenVoting,
+          (customTokenManager && ethers.isAddress(customTokenManager)) ? customTokenManager : ethers.ZeroAddress,
+          (customVotingPaymaster && ethers.isAddress(customVotingPaymaster)) ? customVotingPaymaster : ethers.ZeroAddress
         );
         console.log('✓ Static call succeeded, will return:', result?.toString());
       } catch (staticErr) {
@@ -573,6 +729,8 @@ export default function AdminPanel({ mode = 'production' }) {
           duration,
           enableTokenVoting,
           requireTokenVoting,
+          (customTokenManager && ethers.isAddress(customTokenManager)) ? customTokenManager : ethers.ZeroAddress,
+          (customVotingPaymaster && ethers.isAddress(customVotingPaymaster)) ? customVotingPaymaster : ethers.ZeroAddress,
           overrides
         ),
         onRetry: () => setStatus('Nonce conflict detected, retrying with latest nonce...')
@@ -793,14 +951,26 @@ export default function AdminPanel({ mode = 'production' }) {
         return;
       }
 
-      const amounts = addresses.map(() => amount);
-
       setStatus(`Allocating ${amount} token(s) each to ${addresses.length} voter(s)...`);
-      const tx = await sendTxWithNonceRetry({
-        signer,
-        sendTx: (overrides = {}) => contract.allocateVotingTokens(topUpPollId, addresses, amounts, overrides),
-        onRetry: () => setStatus('Nonce conflict detected, retrying token top-up...')
-      });
+
+      // Owner uses allocateVotingTokens (works anytime);
+      // Non-owner (franchisee/admin) uses addVotersWithTokens (works before poll starts, re-adds are skipped)
+      let tx;
+      if (isOwner) {
+        const amounts = addresses.map(() => amount);
+        tx = await sendTxWithNonceRetry({
+          signer,
+          sendTx: (overrides = {}) => contract.allocateVotingTokens(topUpPollId, addresses, amounts, overrides),
+          onRetry: () => setStatus('Nonce conflict detected, retrying token top-up...')
+        });
+      } else {
+        // addVotersWithTokens: onlyAdminOrOwner, silently skips already-authorized voters, allocates tokens
+        tx = await sendTxWithNonceRetry({
+          signer,
+          sendTx: (overrides = {}) => contract.addVotersWithTokens(topUpPollId, addresses, amount, overrides),
+          onRetry: () => setStatus('Nonce conflict detected, retrying token top-up...')
+        });
+      }
       await tx.wait();
 
       setStatus(`✅ Top-up successful: ${amount} token(s) allocated to ${addresses.length} voter(s).`);
@@ -832,7 +1002,7 @@ export default function AdminPanel({ mode = 'production' }) {
         return;
       }
 
-      const provider = getProvider();
+      const provider = getEffectiveProvider();
       const contract = getContract(provider);
       const balance = await contract.getVoterTokenBalance(balanceCheckPollId, balanceCheckVoterAddress);
 
@@ -997,29 +1167,509 @@ export default function AdminPanel({ mode = 'production' }) {
     }
   }
 
-  async function endPoll(pollId) {
+  // Poll ending is handled automatically by the contract when endTime is reached.
+  // No manual endPoll button is exposed.
+
+  // ─── Enable Secret Ballot for a poll ───────────────────────────────────────
+  async function enableSecretBallotForPoll(e) {
+    e.preventDefault();
     setStatus(null);
     setLoading(true);
+    try {
+      if (!secretBallotPollId) { setStatus('Select a poll first'); setLoading(false); return; }
+      const signer = walletSigner || await getSigner();
+      const contract = getContract(signer);
+      setStatus('Enabling secret ballot...');
+      const tx = await sendTxWithNonceRetry({
+        signer,
+        sendTx: (overrides = {}) => contract.enableSecretBallot(secretBallotPollId, overrides),
+        onRetry: () => setStatus('Retrying enableSecretBallot...')
+      });
+      await tx.wait();
+      setStatus(`✅ Secret ballot enabled for poll #${secretBallotPollId}`);
 
+      // Set custom reveal duration if not default (60 min)
+      const revealSecs = Number(revealDurationMinutes) * 60;
+      if (revealSecs > 0 && revealSecs !== 3600) {
+        try {
+          setStatus(`Setting reveal duration to ${revealDurationMinutes} minutes...`);
+          const sbm = getSecretBallotManagerContract(signer);
+          const rdTx = await sendTxWithNonceRetry({
+            signer,
+            sendTx: (overrides = {}) => sbm.setRevealDuration(secretBallotPollId, revealSecs, overrides),
+            onRetry: () => setStatus('Retrying setRevealDuration...')
+          });
+          await rdTx.wait();
+          setStatus(`✅ Secret ballot enabled with ${revealDurationMinutes}m reveal window for poll #${secretBallotPollId}`);
+        } catch (rdErr) {
+          setStatus(`✅ Secret ballot enabled, but failed to set reveal duration: ${getContractErrorDetails(rdErr).description}`);
+        }
+      }
+      await loadPolls();
+    } catch (err) {
+      setStatus(`Error: ${getContractErrorDetails(err).description}`);
+    } finally { setLoading(false); }
+  }
+
+  // ─── Enable Quadratic Voting for a poll ────────────────────────────────────
+  async function enableQuadraticForPoll(e) {
+    e.preventDefault();
+    setStatus(null);
+    setLoading(true);
+    try {
+      if (!quadraticPollId) { setStatus('Select a poll first'); setLoading(false); return; }
+      const signer = walletSigner || await getSigner();
+      const contract = getContract(signer);
+      setStatus('Enabling quadratic voting...');
+      const tx = await sendTxWithNonceRetry({
+        signer,
+        sendTx: (overrides = {}) => contract.enableQuadraticVoting(quadraticPollId, overrides),
+        onRetry: () => setStatus('Retrying enableQuadraticVoting...')
+      });
+      await tx.wait();
+      setStatus(`✅ Quadratic voting enabled for poll #${quadraticPollId}`);
+      await loadPolls();
+    } catch (err) {
+      setStatus(`Error: ${getContractErrorDetails(err).description}`);
+    } finally { setLoading(false); }
+  }
+
+  // ─── Set Max Choices (multi-choice voting) ─────────────────────────────────
+  async function setMaxChoicesForPoll(e) {
+    e.preventDefault();
+    setStatus(null);
+    setLoading(true);
+    try {
+      if (!multiChoicePollId || !maxChoices) { setStatus('Select a poll and enter max choices'); setLoading(false); return; }
+      const signer = walletSigner || await getSigner();
+      const contract = getContract(signer);
+      setStatus('Setting max choices...');
+      const tx = await sendTxWithNonceRetry({
+        signer,
+        sendTx: (overrides = {}) => contract.setMaxChoices(multiChoicePollId, Number(maxChoices), overrides),
+        onRetry: () => setStatus('Retrying setMaxChoices...')
+      });
+      await tx.wait();
+      setStatus(`✅ Max choices set to ${maxChoices} for poll #${multiChoicePollId}`);
+      await loadPolls();
+    } catch (err) {
+      setStatus(`Error: ${getContractErrorDetails(err).description}`);
+    } finally { setLoading(false); }
+  }
+
+  // ─── Set Poll Metadata ─────────────────────────────────────────────────────
+  async function setPollMetadataURI(e) {
+    e.preventDefault();
+    setStatus(null);
+    setLoading(true);
+    try {
+      if (!metadataPollId || !metadataURI) { setStatus('Select a poll and enter metadata URI'); setLoading(false); return; }
+      const signer = walletSigner || await getSigner();
+      const contract = getContract(signer);
+      setStatus('Setting poll metadata...');
+      const tx = await sendTxWithNonceRetry({
+        signer,
+        sendTx: (overrides = {}) => contract.setPollMetadata(metadataPollId, metadataURI, overrides),
+        onRetry: () => setStatus('Retrying setPollMetadata...')
+      });
+      await tx.wait();
+      setStatus(`✅ Metadata set for poll #${metadataPollId}`);
+      setMetadataURI('');
+    } catch (err) {
+      setStatus(`Error: ${getContractErrorDetails(err).description}`);
+    } finally { setLoading(false); }
+  }
+
+  // ─── Remove Voter ──────────────────────────────────────────────────────────
+  async function removeVoterFromPoll(e) {
+    e.preventDefault();
+    setStatus(null);
+    setLoading(true);
+    try {
+      if (!removeVoterPollId || !removeVoterAddress) { setStatus('Select a poll and enter voter address'); setLoading(false); return; }
+      if (!ethers.isAddress(removeVoterAddress)) { setStatus('Error: Invalid voter address'); setLoading(false); return; }
+      const signer = walletSigner || await getSigner();
+      const contract = getContract(signer);
+      setStatus('Removing voter...');
+      const tx = await sendTxWithNonceRetry({
+        signer,
+        sendTx: (overrides = {}) => contract.removeVoter(removeVoterPollId, removeVoterAddress, overrides),
+        onRetry: () => setStatus('Retrying removeVoter...')
+      });
+      await tx.wait();
+      setStatus(`✅ Voter ${removeVoterAddress} removed from poll #${removeVoterPollId}`);
+      setRemoveVoterAddress('');
+      await loadPolls();
+    } catch (err) {
+      setStatus(`Error: ${getContractErrorDetails(err).description}`);
+    } finally { setLoading(false); }
+  }
+
+  // ─── Set SecretBallotManager address ───────────────────────────────────────
+  async function setSecretBallotManagerAddress(e) {
+    e.preventDefault();
+    setStatus(null);
+    setLoading(true);
+    try {
+      if (!sbmAddress || !ethers.isAddress(sbmAddress)) { setStatus('Error: Invalid SecretBallotManager address'); setLoading(false); return; }
+      const signer = walletSigner || await getSigner();
+      const contract = getContract(signer);
+      setStatus('Setting SecretBallotManager...');
+      const tx = await sendTxWithNonceRetry({
+        signer,
+        sendTx: (overrides = {}) => contract.setSecretBallotManager(sbmAddress, overrides),
+        onRetry: () => setStatus('Retrying setSecretBallotManager...')
+      });
+      await tx.wait();
+      setStatus(`✅ SecretBallotManager set to ${sbmAddress}`);
+    } catch (err) {
+      setStatus(`Error: ${getContractErrorDetails(err).description}`);
+    } finally { setLoading(false); }
+  }
+
+  // ─── Set TokenManager address ──────────────────────────────────────────────
+  async function setTokenManagerAddress(e) {
+    e.preventDefault();
+    setStatus(null);
+    setLoading(true);
+    try {
+      if (!tokenMgrAddress || !ethers.isAddress(tokenMgrAddress)) { setStatus('Error: Invalid TokenManager address'); setLoading(false); return; }
+      const signer = walletSigner || await getSigner();
+      const contract = getContract(signer);
+      setStatus('Setting TokenManager...');
+      const tx = await sendTxWithNonceRetry({
+        signer,
+        sendTx: (overrides = {}) => contract.setTokenManager(tokenMgrAddress, overrides),
+        onRetry: () => setStatus('Retrying setTokenManager...')
+      });
+      await tx.wait();
+      setStatus(`✅ TokenManager set to ${tokenMgrAddress}`);
+    } catch (err) {
+      setStatus(`Error: ${getContractErrorDetails(err).description}`);
+    } finally { setLoading(false); }
+  }
+
+  // ─── Lock Infrastructure ───────────────────────────────────────────────────
+  async function lockInfra() {
+    setStatus(null);
+    setLoading(true);
     try {
       const signer = walletSigner || await getSigner();
       const contract = getContract(signer);
-
-      setStatus('Ending poll...');
+      setStatus('Locking infrastructure (irreversible)...');
       const tx = await sendTxWithNonceRetry({
         signer,
-        sendTx: (overrides = {}) => contract.endPoll(pollId, overrides),
-        onRetry: () => setStatus('Nonce conflict detected, retrying end poll...')
+        sendTx: (overrides = {}) => contract.lockInfrastructure(overrides),
+        onRetry: () => setStatus('Retrying lockInfrastructure...')
       });
       await tx.wait();
+      setInfraLocked(true);
+      setStatus('✅ Infrastructure locked permanently.');
+    } catch (err) {
+      setStatus(`Error: ${getContractErrorDetails(err).description}`);
+    } finally { setLoading(false); }
+  }
 
-      setStatus('Poll ended successfully!');
+  // ─── Franchise Management ──────────────────────────────────────────────────
+  async function loadFranchises() {
+    try {
+      const provider = getEffectiveProvider();
+      const fm = getFranchiseManagerContract(provider);
+      setFranchiseManagerAddr(fm.target);
+      const count = Number(await fm.franchiseCount());
+      const fee = await fm.transferFee();
+      setTransferFee(ethers.formatEther(fee));
+      // Fetch accumulated fees (contract ETH balance)
+      try {
+        const balance = await provider.getBalance(fm.target);
+        setFmBalance(ethers.formatEther(balance));
+      } catch { setFmBalance('0'); }
+      const data = [];
+      for (let i = 1; i <= count; i++) {
+        try {
+          const f = await fm.getFranchise(i);
+          const tr = await fm.transferRequests(i);
+          data.push({
+            id: i,
+            franchisee: f.franchisee || f[0],
+            expiresAt: Number(f.expiresAt || f[1]),
+            maxPolls: Number(f.maxPolls || f[2]),
+            pollsUsed: Number(f.pollsUsed || f[3]),
+            feePerPoll: ethers.formatEther(f.feePerPoll || f[4]),
+            expired: f.expired ?? f[5],
+            exhausted: f.exhausted ?? f[6],
+            transferRequest: {
+              newFranchisee: tr.newFranchisee || tr[0],
+              feePaid: ethers.formatEther(tr.feePaid || tr[1]),
+              pending: tr.pending ?? tr[2]
+            }
+          });
+        } catch { }
+      }
+      setFranchises(data);
+
+      // Check if connected user is a franchisee
+      if (addr) {
+        try {
+          const fId = Number(await fm.franchiseeToId(addr));
+          if (fId > 0) {
+            setIsFranchisee(true);
+            setMyFranchiseId(fId);
+            const mine = data.find(f => f.id === fId);
+            setMyFranchise(mine || null);
+          } else {
+            setIsFranchisee(false);
+            setMyFranchiseId(0);
+            setMyFranchise(null);
+          }
+        } catch {
+          setIsFranchisee(false);
+          setMyFranchiseId(0);
+          setMyFranchise(null);
+        }
+      }
+    } catch (err) {
+      console.error('Error loading franchises:', err.message);
+    }
+  }
+
+  // ─── Franchisee Actions ────────────────────────────────────────────────────
+  async function handleCreateFranchisePoll(e) {
+    e.preventDefault();
+    setStatus(null);
+    setLoading(true);
+    try {
+      if (!fpTitle.trim()) { setStatus('Error: Poll title is required'); setLoading(false); return; }
+      const signer = walletSigner || await getSigner();
+      const fm = getFranchiseManagerContract(signer);
+      const nowTs = Math.floor(Date.now() / 1000);
+      // Use user-selected start time or default buffer
+      // Local mode: 15s for quick testing; Production: 10 minutes
+      const defaultBuffer = mode === 'local' ? 15 : 600;
+      const startTime = fpStartTime ? parseDateTimeLocalToUnix(fpStartTime) : nowTs + defaultBuffer;
+      if (!startTime || startTime <= nowTs) {
+        setStatus(`Error: Start time must be in the future. Leave blank for ${mode === 'local' ? '15 seconds' : '10 minutes'} from now.`);
+        setLoading(false);
+        return;
+      }
+      setStatus('Creating franchise poll...');
+      const tx = await sendTxWithNonceRetry({
+        signer,
+        sendTx: (overrides = {}) => {
+          const feePerPoll = myFranchise ? ethers.parseEther(myFranchise.feePerPoll) : 0n;
+          return fm.createFranchisePoll(
+            fpTitle.trim(),
+            startTime,
+            Number(fpDuration),
+            fpEnableToken,
+            fpRequireToken,
+            { ...overrides, value: feePerPoll }
+          );
+        },
+        onRetry: () => setStatus('Retrying createFranchisePoll...')
+      });
+      const receipt = await tx.wait();
+      setStatus(`✅ Franchise poll created! TX: ${receipt.hash.slice(0, 10)}...`);
+      setFpTitle('');
+      setFpStartTime('');
+      await loadFranchises();
       await loadPolls();
     } catch (err) {
-      setStatus(`Error: ${err.message || err}`);
-    } finally {
-      setLoading(false);
-    }
+      setStatus(`Error: ${getContractErrorDetails(err).description}`);
+    } finally { setLoading(false); }
+  }
+
+  async function handleRequestTransfer(e) {
+    e.preventDefault();
+    setStatus(null);
+    setLoading(true);
+    try {
+      if (!transferToAddress || !ethers.isAddress(transferToAddress)) {
+        setStatus('Error: Invalid new franchisee address'); setLoading(false); return;
+      }
+      const signer = walletSigner || await getSigner();
+      const fm = getFranchiseManagerContract(signer);
+      const fee = await fm.transferFee();
+      setStatus('Requesting franchise transfer...');
+      const tx = await sendTxWithNonceRetry({
+        signer,
+        sendTx: (overrides = {}) => fm.requestTransfer(myFranchiseId, transferToAddress, { ...overrides, value: fee }),
+        onRetry: () => setStatus('Retrying requestTransfer...')
+      });
+      await tx.wait();
+      setStatus('✅ Transfer request submitted! Awaiting owner approval.');
+      setTransferToAddress('');
+      await loadFranchises();
+    } catch (err) {
+      setStatus(`Error: ${getContractErrorDetails(err).description}`);
+    } finally { setLoading(false); }
+  }
+
+  async function handleGrantFranchise(e) {
+    e.preventDefault();
+    setStatus(null);
+    setLoading(true);
+    try {
+      if (!grantFranchisee || !ethers.isAddress(grantFranchisee)) {
+        setStatus('Error: Invalid franchisee address'); setLoading(false); return;
+      }
+      const signer = walletSigner || await getSigner();
+      const fm = getFranchiseManagerContract(signer);
+      setStatus('Granting franchise...');
+      const tx = await sendTxWithNonceRetry({
+        signer,
+        sendTx: (overrides = {}) => fm.grantFranchise(
+          grantFranchisee,
+          Number(grantDuration),
+          Number(grantMaxPolls),
+          ethers.parseEther(grantFeePerPoll || '0'),
+          ethers.ZeroAddress, // tokenManager (use default)
+          (grantPaymaster && ethers.isAddress(grantPaymaster)) ? grantPaymaster : ethers.ZeroAddress,
+          overrides
+        ),
+        onRetry: () => setStatus('Retrying grantFranchise...')
+      });
+      await tx.wait();
+      setStatus('✅ Franchise granted!');
+      setGrantFranchisee('');
+      await loadFranchises();
+    } catch (err) {
+      setStatus(`Error: ${getContractErrorDetails(err).description}`);
+    } finally { setLoading(false); }
+  }
+
+  async function handleSetTransferFee(e) {
+    e.preventDefault();
+    setStatus(null);
+    setLoading(true);
+    try {
+      const signer = walletSigner || await getSigner();
+      const fm = getFranchiseManagerContract(signer);
+      setStatus('Setting transfer fee...');
+      const tx = await sendTxWithNonceRetry({
+        signer,
+        sendTx: (overrides = {}) => fm.setTransferFee(ethers.parseEther(newTransferFee || '0'), overrides),
+        onRetry: () => setStatus('Retrying setTransferFee...')
+      });
+      await tx.wait();
+      setTransferFee(newTransferFee);
+      setNewTransferFee('');
+      setStatus('✅ Transfer fee updated!');
+    } catch (err) {
+      setStatus(`Error: ${getContractErrorDetails(err).description}`);
+    } finally { setLoading(false); }
+  }
+
+  async function handleApproveTransfer(franchiseId) {
+    setStatus(null);
+    setLoading(true);
+    try {
+      const signer = walletSigner || await getSigner();
+      const fm = getFranchiseManagerContract(signer);
+      setStatus(`Approving transfer for franchise #${franchiseId}...`);
+      const tx = await sendTxWithNonceRetry({
+        signer,
+        sendTx: (overrides = {}) => fm.approveTransfer(franchiseId, overrides),
+        onRetry: () => setStatus('Retrying approveTransfer...')
+      });
+      await tx.wait();
+      setStatus(`✅ Transfer approved for franchise #${franchiseId}`);
+      await loadFranchises();
+    } catch (err) {
+      setStatus(`Error: ${getContractErrorDetails(err).description}`);
+    } finally { setLoading(false); }
+  }
+
+  async function handleRejectTransfer(franchiseId) {
+    setStatus(null);
+    setLoading(true);
+    try {
+      const signer = walletSigner || await getSigner();
+      const fm = getFranchiseManagerContract(signer);
+      setStatus(`Rejecting transfer for franchise #${franchiseId}...`);
+      const tx = await sendTxWithNonceRetry({
+        signer,
+        sendTx: (overrides = {}) => fm.rejectTransfer(franchiseId, overrides),
+        onRetry: () => setStatus('Retrying rejectTransfer...')
+      });
+      await tx.wait();
+      setStatus(`✅ Transfer rejected for franchise #${franchiseId}`);
+      await loadFranchises();
+    } catch (err) {
+      setStatus(`Error: ${getContractErrorDetails(err).description}`);
+    } finally { setLoading(false); }
+  }
+
+  async function handleWithdrawFees() {
+    setStatus(null);
+    setLoading(true);
+    try {
+      const signer = walletSigner || await getSigner();
+      const fm = getFranchiseManagerContract(signer);
+      setStatus('Withdrawing fees...');
+      const tx = await sendTxWithNonceRetry({
+        signer,
+        sendTx: (overrides = {}) => fm.withdrawFees(overrides),
+        onRetry: () => setStatus('Retrying withdrawFees...')
+      });
+      await tx.wait();
+      setStatus('✅ Fees withdrawn!');
+      await loadFranchises(); // refresh balance
+    } catch (err) {
+      setStatus(`Error: ${getContractErrorDetails(err).description}`);
+    } finally { setLoading(false); }
+  }
+
+  async function handleAddPolls(e) {
+    e.preventDefault();
+    setStatus(null);
+    setLoading(true);
+    try {
+      if (!addPollsFranchiseId || !addPollsCount || Number(addPollsCount) < 1) {
+        setStatus('Error: Select a franchise and enter a valid number of polls');
+        setLoading(false);
+        return;
+      }
+      const signer = walletSigner || await getSigner();
+      const fm = getFranchiseManagerContract(signer);
+      setStatus(`Adding ${addPollsCount} polls to franchise #${addPollsFranchiseId}...`);
+      const tx = await sendTxWithNonceRetry({
+        signer,
+        sendTx: (overrides = {}) => fm.addPolls(Number(addPollsFranchiseId), Number(addPollsCount), overrides),
+        onRetry: () => setStatus('Retrying addPolls...')
+      });
+      await tx.wait();
+      setStatus(`✅ Added ${addPollsCount} polls to franchise #${addPollsFranchiseId}`);
+      setAddPollsCount('');
+      await loadFranchises();
+    } catch (err) {
+      setStatus(`Error: ${getContractErrorDetails(err).description}`);
+    } finally { setLoading(false); }
+  }
+
+  async function handleSetFranchiseManager(e) {
+    e.preventDefault();
+    setStatus(null);
+    setLoading(true);
+    try {
+      if (!fmAddrInput || !ethers.isAddress(fmAddrInput)) {
+        setStatus('Error: Invalid FranchiseManager address');
+        setLoading(false);
+        return;
+      }
+      const signer = walletSigner || await getSigner();
+      const contract = getContract(signer);
+      setStatus('Setting FranchiseManager...');
+      const tx = await sendTxWithNonceRetry({
+        signer,
+        sendTx: (overrides = {}) => contract.setFranchiseManager(fmAddrInput, overrides),
+        onRetry: () => setStatus('Retrying setFranchiseManager...')
+      });
+      await tx.wait();
+      setStatus(`✅ FranchiseManager set to ${fmAddrInput}`);
+    } catch (err) {
+      setStatus(`Error: ${getContractErrorDetails(err).description}`);
+    } finally { setLoading(false); }
   }
 
   async function togglePollDetails(pollId) {
@@ -1044,16 +1694,21 @@ export default function AdminPanel({ mode = 'production' }) {
   useEffect(() => {
     if (addr) {
       loadOwnership(addr);
+      loadFranchises();
+      loadExistingPollNames();
       let pollInterval;
+      const refreshMs = Number(process.env.REACT_APP_REFRESH_INTERVAL);
 
       const startPolling = () => {
         if (document.visibilityState !== 'visible') return;
         loadPolls();
-        pollInterval = setInterval(() => {
-          if (document.visibilityState === 'visible') {
-            loadPolls();
-          }
-        }, 30000);
+        if (refreshMs > 0) {
+          pollInterval = setInterval(() => {
+            if (document.visibilityState === 'visible') {
+              loadPolls();
+            }
+          }, refreshMs);
+        }
       };
 
       const stopPolling = () => {
@@ -1070,9 +1725,26 @@ export default function AdminPanel({ mode = 'production' }) {
 
       startPolling();
       document.addEventListener('visibilitychange', handleVisibility);
+
+      // Real-time event listeners — refresh immediately when key events fire
+      const readContract = getContract(getProvider());
+      const eventHandler = () => { loadPolls(); loadExistingPollNames(); };
+      const eventNames = ['PollCreated', 'Voted', 'ResultsRevealed', 'OptionAdded', 'VoterAuthorized', 'VoterUnauthorized', 'SecretBallotEnabled', 'PollMetadataSet'];
+      const listeners = [];
+      for (const eventName of eventNames) {
+        try {
+          readContract.on(eventName, eventHandler);
+          listeners.push(eventName);
+        } catch { /* event may not exist in ABI */ }
+      }
+      console.log('📡 Admin: Listening for live events:', listeners.join(', '));
+
       return () => {
         stopPolling();
         document.removeEventListener('visibilitychange', handleVisibility);
+        for (const eventName of listeners) {
+          try { readContract.off(eventName, eventHandler); } catch {}
+        }
       };
     }
   }, [addr]);
@@ -1112,71 +1784,1202 @@ export default function AdminPanel({ mode = 'production' }) {
     return new Date(time * 1000).toLocaleString();
   };
 
+  const [activeTab, setActiveTab] = useState('dashboard');
+
+  // No auto-redirect needed — franchisees now have full access to Dashboard, Create, Participants, Settings tabs
+
   const previewStartTs = pollStartTime ? parseDateTimeLocalToUnix(pollStartTime) : null;
   const previewStartUtc = previewStartTs ? formatUtcDateTime(previewStartTs) : null;
   const previewStartOffset = previewStartTs ? formatLocalUtcOffset(previewStartTs) : null;
 
   const voterPath = mode === 'local' ? '/local/voter' : '/voter';
 
+  const isFranchiseeRole = role === 'franchisee';
+
+  const TABS = [
+    { id: 'dashboard', label: 'Dashboard', icon: '📊', showWhen: () => isOwner || isFranchisee },
+    { id: 'create', label: 'Create Poll', icon: '➕', showWhen: () => isOwner || isFranchisee },
+    { id: 'participants', label: 'Candidates & Voters', icon: '👥', showWhen: () => isOwner || isFranchisee, needsPolls: true },
+    { id: 'settings', label: 'Poll Settings', icon: '⚙️', showWhen: () => isOwner || isFranchisee, needsPolls: true },
+    { id: 'franchises', label: 'Franchises', icon: '🏢', showWhen: () => (isOwner || isFranchisee) && !isFranchiseeRole },
+    { id: 'infra', label: 'Infrastructure', icon: '🔧', ownerOnly: true },
+  ];
+
+  const visibleTabs = TABS.filter(tab => {
+    if (tab.showWhen && !tab.showWhen()) return false;
+    if (tab.ownerOnly && !isOwner) return false;
+    if (tab.needsPolls && polls.length === 0) return false;
+    return true;
+  });
+
+  // ─── Filtered + paginated dashboard polls ──────────────────────────────────
+  const filteredPolls = useMemo(() => {
+    const nowTs = Math.floor(Date.now() / 1000);
+    let result = [...polls];
+    // Owner sees all polls; franchisees/admins see only their own
+    if (addr && isFranchiseeRole) {
+      result = result.filter(p => p.admin?.toLowerCase() === addr.toLowerCase());
+    }
+    // Text search
+    if (dashboardSearch.trim()) {
+      const q = dashboardSearch.toLowerCase();
+      result = result.filter(p =>
+        p.title.toLowerCase().includes(q) ||
+        String(p.id).includes(q) ||
+        (p.admin && p.admin.toLowerCase().includes(q))
+      );
+    }
+    // Status filter
+    if (dashboardFilter !== 'all') {
+      result = result.filter(p => {
+        const st = p.status || {};
+        const hasEnded = st.ended || (p.endTime && p.endTime <= nowTs);
+        const hasStarted = p.startTime ? p.startTime <= nowTs : true;
+        switch (dashboardFilter) {
+          case 'active': return hasStarted && !hasEnded;
+          case 'ended': return hasEnded && !st.revealed;
+          case 'revealed': return !!st.revealed;
+          case 'scheduled': return !hasStarted;
+          default: return true;
+        }
+      });
+    }
+    return result;
+  }, [polls, dashboardSearch, dashboardFilter, addr]);
+
+  const dashboardPollsPage = useMemo(() => {
+    const start = (dashboardPage - 1) * dashboardPageSize;
+    return filteredPolls.slice(start, start + dashboardPageSize);
+  }, [filteredPolls, dashboardPage, dashboardPageSize]);
+
+  // Reset page when filter/search changes
+  useEffect(() => { setDashboardPage(1); }, [dashboardSearch, dashboardFilter]);
+
+  // ─── Filtered + paginated franchises ───────────────────────────────────────
+  const filteredFranchises = useMemo(() => {
+    if (!franchiseSearch.trim()) return franchises;
+    const q = franchiseSearch.toLowerCase();
+    return franchises.filter(f =>
+      String(f.id).includes(q) ||
+      f.franchisee.toLowerCase().includes(q)
+    );
+  }, [franchises, franchiseSearch]);
+
+  const franchisesPage = useMemo(() => {
+    const start = (franchisePage - 1) * franchisePageSize;
+    return filteredFranchises.slice(start, start + franchisePageSize);
+  }, [filteredFranchises, franchisePage, franchisePageSize]);
+
+  useEffect(() => { setFranchisePage(1); }, [franchiseSearch]);
+
+  // ─── Helper: render poll selector dropdown ─────────────────────────────────
+  function PollSelect({ value, onChange, filterFn, placeholder = 'Select Poll', className = 'form-input' }) {
+    // Always scope to polls where the connected user is the admin
+    const myPolls = polls.filter(p => p.admin?.toLowerCase() === addr?.toLowerCase());
+    const filtered = filterFn ? myPolls.filter(filterFn) : myPolls;
+    return (
+      <select value={value} onChange={onChange} className={className}>
+        <option value="">{placeholder}</option>
+        {filtered.map(poll => (
+          <option key={poll.id} value={poll.id}>
+            Poll #{poll.id}: {poll.title}
+          </option>
+        ))}
+      </select>
+    );
+  }
+
+  // ─── Helper: compute poll status label & flags ──────────────────────────────
+  function getPollStatusInfo(poll) {
+    const nowTs = Math.floor(Date.now() / 1000);
+    const st = poll.status || { started: true, active: false, ended: poll.ended, revealed: poll.revealed };
+    const hasStartedByTime = poll.startTime ? nowTs >= poll.startTime : true;
+    const hasEndedByTime = poll.endTime ? nowTs >= poll.endTime : false;
+    const isEndedEffective = Boolean(st.ended || hasEndedByTime);
+    const isUpcoming = !isEndedEffective && !hasStartedByTime;
+    const isActiveEffective = !isEndedEffective && (st.active || (hasStartedByTime && !hasEndedByTime));
+    const statusLabel = st.revealed ? 'Revealed' : isEndedEffective ? 'Ended' : isActiveEffective ? 'Active' : isUpcoming ? 'Scheduled' : 'Inactive';
+    const timeLabel = isEndedEffective ? 'Ended' : isUpcoming ? formatTimeUntil(poll.startTime) : formatTimeRemaining(poll.endTime);
+    const chipClass = st.revealed ? 'chip-success' : isEndedEffective ? 'chip-warning' : isActiveEffective ? '' : 'chip-warning';
+    return { st, isEndedEffective, isUpcoming, isActiveEffective, statusLabel, timeLabel, chipClass };
+  }
+
   return (
     <div className="admin-panel">
+      {/* ─── Global Status Banner ─────────────────────────────────────── */}
       {status && (
-        <div className={`status-banner ${status.includes('Error') ? 'status-error' : 'status-success'}`}>
+        <div className={`status-banner ${status.includes('Error') || status.includes('❌') ? 'status-error' : 'status-success'}`}>
           {status}
         </div>
       )}
 
-      <div className="panel-grid">
-        <section className="panel-card">
-          <div className="panel-head">
-            <h3>Connection</h3>
+      {/* ─── Connection Bar (always visible) ──────────────────────────── */}
+      <section className="panel-card admin-connection-bar">
+        <div className="admin-connection-bar__inner">
+          <div className="admin-connection-bar__left">
+            <h3 style={{ margin: 0 }}>Connection</h3>
             {addr && (
               <span className="address-pill">
                 {addr} {isOwner && '(Owner)'}
               </span>
             )}
           </div>
-
-          {mode === 'local' ? (
-            <div>
-              <div className="muted">Select a test account (no MetaMask needed).</div>
+          <div className="admin-connection-bar__right">
+            {mode === 'local' ? (
               <div className="account-grid">
-                {HARDHAT_ACCOUNTS.map((account, index) => (
+                {(isFranchiseeRole ? HARDHAT_ACCOUNTS : HARDHAT_ACCOUNTS.slice(0, 1)).map((account, index) => (
                   <button
                     key={index}
-                    className={`btn secondary ${selectedAccount === index && walletSigner ? 'is-active' : ''}`}
+                    className={`btn secondary btn-sm ${selectedAccount === index && walletSigner ? 'is-active' : ''}`}
                     onClick={() => connectLocalAccount(index)}
                   >
                     {account.name}
                   </button>
                 ))}
               </div>
-            </div>
-          ) : (
-            <button className="btn" onClick={connectWallet}>
-              {addr ? 'Reconnect MetaMask' : 'Connect MetaMask Wallet'}
-            </button>
-          )}
+            ) : (
+              <button className="btn" onClick={connectWallet}>
+                {addr ? 'Reconnect MetaMask' : 'Connect MetaMask Wallet'}
+              </button>
+            )}
+          </div>
+        </div>
+      </section>
+
+      {/* ─── Not-owner message (only on admin page, not franchisee page) ── */}
+      {addr && !isOwner && !isFranchisee && !isFranchiseeRole && (
+        <section className="panel-card panel-card--wide">
+          <div className="panel-head">
+            <h3>Admin Access</h3>
+            <span className="chip">Owner only</span>
+          </div>
+          <div className="status-banner status-warning">
+            This section is available only to the contract owner. Switch to the owner account or use the voter page at{' '}
+            <a href={voterPath}>{voterPath}</a>.
+          </div>
         </section>
+      )}
 
-        {addr && isOwner && (
-          <section className="panel-card">
-            <div className="panel-head">
-              <h3>Ownership</h3>
-              <span className="chip">{isOwner ? 'Owner' : isPendingOwner ? 'Pending' : 'Viewer'}</span>
-            </div>
-            <div className="meta-list">
-              <div>
-                <span>Current owner</span>
-                <strong>{ownerAddress || 'Unknown'}</strong>
-              </div>
-              <div>
-                <span>Pending owner</span>
-                <strong>{pendingOwner && pendingOwner !== ethers.ZeroAddress ? pendingOwner : 'None'}</strong>
-              </div>
-            </div>
+      {/* ─── Not-franchisee message (only on franchisee page) ─────────── */}
+      {addr && !isFranchisee && isFranchiseeRole && (
+        <section className="panel-card panel-card--wide">
+          <div className="panel-head">
+            <h3>Franchisee Access</h3>
+            <span className="chip">Franchisee only</span>
+          </div>
+          <div className="status-banner status-warning">
+            You don't have an active franchise. Contact the contract owner to be granted one.
+          </div>
+        </section>
+      )}
 
+      {/* ─── Franchise Info Banner (franchisee page only) ─────────────── */}
+      {addr && isFranchisee && isFranchiseeRole && myFranchise && (
+        <section className="panel-card panel-card--wide">
+          <div className="panel-head">
+            <h3>My Franchise #{myFranchiseId}</h3>
+            <span className={`chip ${!myFranchise.expired && !myFranchise.exhausted ? 'chip-success' : 'chip-warning'}`}>
+              {myFranchise.expired ? 'Expired' : myFranchise.exhausted ? 'Exhausted' : 'Active'}
+            </span>
+          </div>
+          <div style={{ display: 'flex', gap: '1.5rem', flexWrap: 'wrap', fontSize: 14 }}>
+            <div><span className="muted">Polls Used:</span> <strong>{myFranchise.pollsUsed} / {myFranchise.maxPolls}</strong></div>
+            <div><span className="muted">Remaining:</span> <strong>{myFranchise.maxPolls - myFranchise.pollsUsed}</strong></div>
+            <div><span className="muted">Expires:</span> <strong>{new Date(myFranchise.expiresAt * 1000).toLocaleString()}</strong></div>
+            <div><span className="muted">Fee/Poll:</span> <strong>{myFranchise.feePerPoll === '0.0' ? 'Free' : `${myFranchise.feePerPoll} ETH`}</strong></div>
+          </div>
+        </section>
+      )}
+
+      {/* ─── Tab Navigation ───────────────────────────────────────────── */}
+      {addr && (isOwner || (isFranchisee && isFranchiseeRole)) && (
+        <nav className="admin-tabs">
+          {visibleTabs.map(tab => (
+            <button
+              key={tab.id}
+              className={`admin-tab ${activeTab === tab.id ? 'admin-tab--active' : ''}`}
+              onClick={() => setActiveTab(tab.id)}
+            >
+              <span className="admin-tab__icon">{tab.icon}</span>
+              <span className="admin-tab__label">{tab.label}</span>
+            </button>
+          ))}
+        </nav>
+      )}
+
+      {/* ═══════════════════════════════════════════════════════════════ */}
+      {/* TAB: Dashboard                                                 */}
+      {/* ═══════════════════════════════════════════════════════════════ */}
+      {addr && (isOwner || isFranchisee) && activeTab === 'dashboard' && (
+        <div className="admin-tab-content">
+          {polls.length > 0 ? (
+            <section className="panel-card panel-card--wide">
+              <div className="panel-head">
+                <h3>{isOwner ? 'Manage Polls' : 'My Polls'} ({filteredPolls.length} of {polls.length})</h3>
+                {(isOwner || isFranchisee) && <button className="btn btn-sm" onClick={() => setActiveTab('create')}>+ New Poll</button>}
+              </div>
+
+              <SearchBar
+                searchTerm={dashboardSearch}
+                onSearchChange={setDashboardSearch}
+                placeholder="Search polls by title, admin or ID…"
+                filters={[
+                  { id: 'all',       label: 'All',       active: dashboardFilter === 'all' },
+                  { id: 'active',    label: 'Active',    active: dashboardFilter === 'active' },
+                  { id: 'ended',     label: 'Ended',     active: dashboardFilter === 'ended' },
+                  { id: 'revealed',  label: 'Revealed',  active: dashboardFilter === 'revealed' },
+                  { id: 'scheduled', label: 'Scheduled', active: dashboardFilter === 'scheduled' },
+                ]}
+                onFilterToggle={(id) => setDashboardFilter(id)}
+              />
+
+              <div className="data-table-wrap">
+                <table className="data-table">
+                  <thead>
+                    <tr>
+                      <th>#</th>
+                      <th>Title</th>
+                      <th>Admin</th>
+                      <th>Status</th>
+                      <th>Time</th>
+                      <th>Candidates</th>
+                      <th>Votes</th>
+                      <th>Actions</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {dashboardPollsPage.map(poll => {
+                      const info = getPollStatusInfo(poll);
+                      return (
+                        <React.Fragment key={poll.id}>
+                          <tr>
+                            <td>{poll.id}</td>
+                            <td>{poll.title}</td>
+                            <td className="muted small" style={{ maxWidth: 140, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{poll.admin}</td>
+                            <td><span className={`chip ${info.chipClass}`}>{info.statusLabel}</span></td>
+                            <td>{info.timeLabel}</td>
+                            <td>{poll.optionsCount}</td>
+                            <td>{poll.totalVotes}</td>
+                            <td style={{ display: 'flex', gap: '0.25rem', flexWrap: 'wrap' }}>
+                              <button className="btn btn-sm secondary" onClick={() => togglePollDetails(poll.id)}>
+                                {expandedPoll === poll.id ? 'Hide' : 'Details'}
+                              </button>
+                              {(() => {
+                                if (info.st.revealed) return null;
+                                const nowSec = Math.floor(Date.now() / 1000);
+                                const TIME_BUFFER = 30;
+                                const revealDuration = poll.isSecretBallot ? (poll.revealDuration || 3600) : 0;
+                                // Standard poll: can reveal after endTime + TIME_BUFFER
+                                // Secret ballot: can reveal after endTime + TIME_BUFFER + revealDuration
+                                const revealableAfter = poll.isSecretBallot
+                                  ? (poll.endTime + TIME_BUFFER + revealDuration)
+                                  : (poll.endTime + TIME_BUFFER);
+                                const canReveal = info.isEndedEffective && nowSec >= revealableAfter;
+                                const waitingForRevealPeriod = info.isEndedEffective && !canReveal;
+                                const revealCountdown = waitingForRevealPeriod ? Math.max(0, revealableAfter - nowSec) : 0;
+                                const revealMins = Math.floor(revealCountdown / 60);
+                                const revealSecs = revealCountdown % 60;
+                                return (
+                                  <>
+                                    {canReveal && (
+                                      <button className="btn btn-sm" onClick={() => revealResults(poll.id)} disabled={loading}>Reveal</button>
+                                    )}
+                                    {waitingForRevealPeriod && (
+                                      <>
+                                        <button className="btn btn-sm" onClick={() => revealResults(poll.id)} disabled={loading}>
+                                          Reveal
+                                        </button>
+                                        <span className="muted small" style={{ alignSelf: 'center' }}>
+                                          {poll.isSecretBallot
+                                            ? `Reveal period (${revealMins}m ${revealSecs}s left)`
+                                            : `Finalizing (${revealSecs}s)...`}
+                                        </span>
+                                      </>
+                                    )}
+                                  </>
+                                );
+                              })()}
+                            </td>
+                          </tr>
+                          {expandedPoll === poll.id && poll.options && (
+                            <tr>
+                              <td colSpan="8" style={{ padding: '0.5rem 1rem', background: 'var(--surface-alt, #f7f8fa)' }}>
+                                <strong>Candidates</strong>
+                                <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.5rem', marginTop: '0.25rem' }}>
+                                  {poll.options.map(opt => (
+                                    <span key={opt.id} className="chip">
+                                      {opt.name} {poll.revealed ? `(${opt.votes} votes)` : ''}
+                                    </span>
+                                  ))}
+                                </div>
+                                {!poll.revealed && poll.totalVotes > 0 && (
+                                  <div className="muted small" style={{ marginTop: '0.5rem' }}>
+                                    🔒 {poll.totalVotes} vote{poll.totalVotes !== 1 ? 's' : ''} cast — per-candidate breakdown hidden until results are revealed.
+                                  </div>
+                                )}
+                                {!poll.revealed && poll.totalVotes === 0 && (
+                                  <div className="muted small" style={{ marginTop: '0.5rem' }}>
+                                    No votes cast yet.
+                                  </div>
+                                )}
+                                {poll.isSecretBallot && <span className="chip" style={{ marginTop: '0.25rem' }}>Secret Ballot</span>}
+                                {poll.quadraticEnabled && <span className="chip" style={{ marginTop: '0.25rem' }}>Quadratic</span>}
+                                {poll.maxChoices > 0 && <span className="chip" style={{ marginTop: '0.25rem' }}>Multi-choice (max {poll.maxChoices})</span>}
+                                {poll.metadataURI && <div className="muted small" style={{ marginTop: '0.25rem', wordBreak: 'break-all' }}>Metadata: {poll.metadataURI}</div>}
+                              </td>
+                            </tr>
+                          )}
+                        </React.Fragment>
+                      );
+                    })}
+                    {dashboardPollsPage.length === 0 && (
+                      <tr><td colSpan="8" style={{ textAlign: 'center', padding: '1.5rem' }}>No polls match your search.</td></tr>
+                    )}
+                  </tbody>
+                </table>
+              </div>
+
+              <Pagination
+                totalItems={filteredPolls.length}
+                page={dashboardPage}
+                pageSize={dashboardPageSize}
+                onPageChange={setDashboardPage}
+                onPageSizeChange={(s) => { setDashboardPageSize(s); setDashboardPage(1); }}
+              />
+            </section>
+          ) : (
+            <div className="empty-state">
+              No polls created yet.{' '}
+              <button className="btn" onClick={() => setActiveTab('create')}>Create Your First Poll</button>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* ═══════════════════════════════════════════════════════════════ */}
+      {/* TAB: Create Poll                                               */}
+      {/* ═══════════════════════════════════════════════════════════════ */}
+      {addr && (isOwner || isFranchisee) && activeTab === 'create' && (
+        <div className="admin-tab-content">
+          <div className="admin-tab-grid">
+
+            {/* ── Owner: Create Poll via ElectionsManager ──────────── */}
             {isOwner && (
+            <section className="panel-card">
+              <div className="panel-head">
+                <h3>Create New Poll</h3>
+              </div>
+              <form onSubmit={createPoll} className="form-stack">
+                <input
+                  type="text"
+                  placeholder="Poll Title"
+                  value={pollTitle}
+                  onChange={e => { setPollTitle(e.target.value); setTitleDuplicateWarning(''); }}
+                  onBlur={() => pollTitle.trim() && checkTitleDuplicate(pollTitle.trim(), setTitleDuplicateWarning)}
+                  className={`form-input ${titleDuplicateWarning ? 'input-warning' : ''}`}
+                />
+                {titleDuplicateWarning && (
+                  <div className="duplicate-warning">{titleDuplicateWarning}</div>
+                )}
+                {existingPollNames.length > 0 && (
+                  <details className="existing-names-list">
+                    <summary className="muted small">View existing poll names ({existingPollNames.length})</summary>
+                    <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.25rem', marginTop: '0.25rem' }}>
+                      {existingPollNames.map((n, i) => <span key={i} className="name-chip">{n}</span>)}
+                    </div>
+                  </details>
+                )}
+                <input
+                  type="text"
+                  placeholder="Admin Address (leave empty to use your address)"
+                  value={pollAdmin}
+                  onChange={e => setPollAdmin(e.target.value)}
+                  className="form-input"
+                />
+                <label className="form-label">Start Time</label>
+                <input
+                  type="datetime-local"
+                  value={pollStartTime}
+                  onChange={e => setPollStartTime(e.target.value)}
+                  className="form-input"
+                />
+                <div className="muted small">Leave blank to start 1 minute from now. Selected time is your local time and will be converted to UTC automatically.</div>
+                {pollStartTime && (
+                  <div className="muted small">
+                    You selected local time: {previewStartTs ? new Date(previewStartTs * 1000).toLocaleString() : 'Invalid date'}
+                    {previewStartOffset ? ` (${previewStartOffset})` : ''}
+                    {previewStartUtc ? ` → submitted as UTC: ${previewStartUtc}` : ''}
+                  </div>
+                )}
+                <label className="form-label">Duration</label>
+                <input
+                  type="number"
+                  placeholder="Duration (seconds)"
+                  value={pollDuration}
+                  onChange={e => setPollDuration(e.target.value)}
+                  className="form-input"
+                />
+                <div className="muted small">Suggested: 300 (5 min), 3600 (1 hour), 86400 (1 day)</div>
+
+                <button type="submit" className="btn" disabled={loading}>
+                  {loading ? 'Creating...' : 'Create Poll'}
+                </button>
+              </form>
+            </section>
+            )}
+
+            {/* ── Owner: Token Voting Options ──────────────────────── */}
+            {isOwner && (
+            <section className="panel-card">
+              <div className="panel-head">
+                <h3>Token Voting Options</h3>
+              </div>
+              <div className="form-stack">
+                <label className="form-checkbox">
+                  <input
+                    type="checkbox"
+                    checked={enableTokenVoting}
+                    onChange={e => {
+                      const enabled = e.target.checked;
+                      setEnableTokenVoting(enabled);
+                      if (!enabled) setRequireTokenVoting(false);
+                    }}
+                  />
+                  <span>Enable token voting for this poll</span>
+                </label>
+                <label className="form-checkbox">
+                  <input
+                    type="checkbox"
+                    checked={requireTokenVoting}
+                    disabled={!enableTokenVoting}
+                    onChange={e => {
+                      const required = e.target.checked;
+                      setRequireTokenVoting(required);
+                      if (required) setEnableTokenVoting(true);
+                    }}
+                  />
+                  <span>Require token voting (voters must spend tokens)</span>
+                </label>
+                <input
+                  type="number"
+                  min="1"
+                  placeholder="Tokens per voter"
+                  value={tokensPerVoter}
+                  onChange={e => setTokensPerVoter(e.target.value)}
+                  className="form-input"
+                  disabled={!enableTokenVoting}
+                />
+                <label className="form-checkbox">
+                  <input
+                    type="checkbox"
+                    checked={allowGaslessVoting}
+                    disabled={!enableTokenVoting}
+                    onChange={e => setAllowGaslessVoting(e.target.checked)}
+                  />
+                  <span>Allow gasless token voting (requires paymaster)</span>
+                </label>
+
+                <hr style={{ margin: '12px 0', opacity: 0.1 }} />
+                <details>
+                  <summary className="muted small" style={{ cursor: 'pointer' }}>Advanced: Per-poll custom managers</summary>
+                  <div className="form-stack" style={{ marginTop: 8 }}>
+                    <label className="form-label">Custom Token Manager Address</label>
+                    <input
+                      type="text"
+                      placeholder="0x... (leave empty for global default)"
+                      value={customTokenManager}
+                      onChange={e => setCustomTokenManager(e.target.value)}
+                      className="form-input"
+                    />
+                    <label className="form-label">Custom Voting Paymaster Address</label>
+                    <input
+                      type="text"
+                      placeholder="0x... (leave empty for global default)"
+                      value={customVotingPaymaster}
+                      onChange={e => setCustomVotingPaymaster(e.target.value)}
+                      className="form-input"
+                    />
+                    <div className="muted small">Leave empty to use the global TokenManager and VotingPaymaster. Only set these if you have deployed custom per-poll managers.</div>
+                  </div>
+                </details>
+              </div>
+            </section>
+            )}
+
+            {/* ── Franchisee: Create Poll via FranchiseManager ─────── */}
+            {isFranchisee && !isOwner && myFranchise && (
+            <>
+              <section className="panel-card">
+                <div className="panel-head">
+                  <h3>Create Franchise Poll</h3>
+                  <span className={`chip ${!myFranchise.expired && !myFranchise.exhausted ? 'chip-success' : 'chip-warning'}`}>
+                    {myFranchise.pollsUsed} / {myFranchise.maxPolls} polls used
+                  </span>
+                </div>
+                {myFranchise.exhausted ? (
+                  <div className="muted">You have used all your allocated polls.</div>
+                ) : myFranchise.expired ? (
+                  <div className="muted">Your franchise has expired.</div>
+                ) : (
+                  <form onSubmit={handleCreateFranchisePoll} className="form-stack">
+                    <input
+                      type="text" placeholder="Poll Title"
+                      value={fpTitle}
+                      onChange={e => { setFpTitle(e.target.value); setFpTitleDuplicateWarning(''); }}
+                      onBlur={() => fpTitle.trim() && checkTitleDuplicate(fpTitle.trim(), setFpTitleDuplicateWarning)}
+                      className={`form-input ${fpTitleDuplicateWarning ? 'input-warning' : ''}`}
+                    />
+                    {fpTitleDuplicateWarning && (
+                      <div className="duplicate-warning">{fpTitleDuplicateWarning}</div>
+                    )}
+                    {existingPollNames.length > 0 && (
+                      <details className="existing-names-list">
+                        <summary className="muted small">View existing poll names ({existingPollNames.length})</summary>
+                        <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.25rem', marginTop: '0.25rem' }}>
+                          {existingPollNames.map((n, i) => <span key={i} className="name-chip">{n}</span>)}
+                        </div>
+                      </details>
+                    )}
+                    <label className="form-label">Start Time</label>
+                    <input
+                      type="datetime-local"
+                      value={fpStartTime} onChange={e => setFpStartTime(e.target.value)}
+                      className="form-input"
+                    />
+                    <div className="muted small">Leave blank to start {mode === 'local' ? '15 seconds' : '10 minutes'} from now. You must add candidates and voters <strong>before</strong> the poll starts.</div>
+                    <label className="form-label">Duration (seconds)</label>
+                    <input
+                      type="number" min="60" placeholder="Duration in seconds"
+                      value={fpDuration} onChange={e => setFpDuration(e.target.value)}
+                      className="form-input"
+                    />
+                    <div className="muted small">Suggested: 3600 (1h), 86400 (1d), 604800 (1w)</div>
+                    <label className="form-label" style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                      <input type="checkbox" checked={fpEnableToken} onChange={e => setFpEnableToken(e.target.checked)} />
+                      Enable Token Voting
+                    </label>
+                    <label className="form-label" style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                      <input type="checkbox" checked={fpRequireToken} onChange={e => setFpRequireToken(e.target.checked)} />
+                      Require Token Voting
+                    </label>
+                    {myFranchise.feePerPoll !== '0.0' && (
+                      <div className="muted small">Fee: {myFranchise.feePerPoll} ETH will be sent with this transaction.</div>
+                    )}
+                    <button type="submit" className="btn" disabled={loading}>
+                      {loading ? 'Creating...' : 'Create Franchise Poll'}
+                    </button>
+                  </form>
+                )}
+              </section>
+            </>
+            )}
+
+          </div>
+        </div>
+      )}
+
+      {/* ═══════════════════════════════════════════════════════════════ */}
+      {/* TAB: Candidates & Voters                                       */}
+      {/* ═══════════════════════════════════════════════════════════════ */}
+      {addr && (isOwner || isFranchisee) && activeTab === 'participants' && polls.length > 0 && (
+        <div className="admin-tab-content">
+          <div className="admin-tab-grid">
+            {/* Add Candidate */}
+            <section className="panel-card">
+              <div className="panel-head">
+                <h3>Add Candidate</h3>
+              </div>
+              <form onSubmit={addCandidate} className="form-stack">
+                <PollSelect
+                  value={selectedPollId}
+                  onChange={e => setSelectedPollId(e.target.value)}
+                  filterFn={p => !p.ended}
+                />
+                <input
+                  type="text"
+                  placeholder="Candidate Name"
+                  value={candidateName}
+                  onChange={e => setCandidateName(e.target.value)}
+                  className="form-input"
+                />
+                <button type="submit" className="btn" disabled={loading}>
+                  {loading ? 'Adding...' : 'Add Candidate'}
+                </button>
+              </form>
+            </section>
+
+            {/* Add Voters */}
+            <section className="panel-card">
+              <div className="panel-head">
+                <h3>Add Voters</h3>
+              </div>
+              <form onSubmit={addVoters} className="form-stack">
+                <PollSelect
+                  value={voterPollId}
+                  onChange={e => setVoterPollId(e.target.value)}
+                  filterFn={p => !p.ended}
+                />
+                <textarea
+                  placeholder="Voter Addresses (comma-separated)"
+                  value={voterAddresses}
+                  onChange={e => setVoterAddresses(e.target.value)}
+                  rows={4}
+                  className="form-input form-textarea"
+                />
+                {voterPollId && (() => {
+                  const selectedPoll = polls.find(p => String(p.id) === String(voterPollId));
+                  if (!selectedPoll?.tokenConfig?.enabled) return null;
+                  return (
+                    <>
+                      <div className="muted small">
+                        Token voting enabled.
+                        {selectedPoll.tokenConfig.tokenRequired ? ' Token required.' : ' Token optional.'}
+                        {' '}Tokens/voter: {selectedPoll.tokenConfig.tokensPerVoter || 0}
+                        {selectedPoll.tokenConfig.allowGaslessVoting ? ' • Gasless' : ''}
+                      </div>
+                      <input
+                        type="number" min="1" placeholder="Fallback tokens per voter"
+                        value={voterTokensPerVoter}
+                        onChange={e => setVoterTokensPerVoter(e.target.value)}
+                        className="form-input"
+                      />
+                    </>
+                  );
+                })()}
+                {mode === 'local' && (
+                  <button type="button" className="btn ghost btn-sm" onClick={copyVoterAddresses}>
+                    Copy Test Voter Addresses (#1–#4)
+                  </button>
+                )}
+                <button type="submit" className="btn" disabled={loading}>
+                  {loading ? 'Adding...' : 'Add Voters'}
+                </button>
+              </form>
+            </section>
+
+            {/* Remove Voter */}
+            <section className="panel-card">
+              <div className="panel-head">
+                <h3>Remove Voter</h3>
+              </div>
+              <form onSubmit={removeVoterFromPoll} className="form-stack">
+                <PollSelect
+                  value={removeVoterPollId}
+                  onChange={e => setRemoveVoterPollId(e.target.value)}
+                  filterFn={p => !p.ended}
+                />
+                <input
+                  type="text" placeholder="Voter Address to remove"
+                  value={removeVoterAddress} onChange={e => setRemoveVoterAddress(e.target.value)} className="form-input"
+                />
+                <button type="submit" className="btn secondary" disabled={loading}>
+                  {loading ? 'Removing...' : 'Remove Voter'}
+                </button>
+              </form>
+            </section>
+
+            {/* Top Up Tokens */}
+            <section className="panel-card">
+              <div className="panel-head">
+                <h3>Token Management</h3>
+              </div>
+              <form onSubmit={topUpVotingTokens} className="form-stack">
+                <label className="form-label">Top Up Voting Tokens</label>
+                <PollSelect
+                  value={topUpPollId}
+                  onChange={e => setTopUpPollId(e.target.value)}
+                  filterFn={p => !p.ended}
+                />
+                <textarea
+                  placeholder="Voter Addresses (comma-separated)"
+                  value={topUpVoterAddresses}
+                  onChange={e => setTopUpVoterAddresses(e.target.value)}
+                  rows={3}
+                  className="form-input form-textarea"
+                />
+                <input
+                  type="number" min="1" placeholder="Top-up tokens per voter"
+                  value={topUpAmountPerVoter}
+                  onChange={e => setTopUpAmountPerVoter(e.target.value)}
+                  className="form-input"
+                />
+                <button type="submit" className="btn" disabled={loading}>
+                  {loading ? 'Topping Up...' : 'Top Up Tokens'}
+                </button>
+                {!isOwner && (
+                  <div className="muted small">As a poll admin, token allocation uses addVotersWithTokens and only works <strong>before</strong> the poll starts.</div>
+                )}
+              </form>
+
+              <hr style={{ margin: '16px 0', opacity: 0.1 }} />
+
+              <form onSubmit={checkVoterTokenBalance} className="form-stack">
+                <label className="form-label">Check Token Balance</label>
+                <PollSelect
+                  value={balanceCheckPollId}
+                  onChange={e => setBalanceCheckPollId(e.target.value)}
+                  placeholder="Select Poll (Balance Check)"
+                />
+                <input
+                  type="text" placeholder="Voter address"
+                  value={balanceCheckVoterAddress}
+                  onChange={e => setBalanceCheckVoterAddress(e.target.value)}
+                  className="form-input"
+                />
+                <button type="submit" className="btn secondary" disabled={loading}>
+                  {loading ? 'Checking...' : 'Check Balance'}
+                </button>
+              </form>
+              {balanceCheckResult && (
+                <div className="info-banner" style={{ marginTop: 10 }}>
+                  Poll #{balanceCheckResult.pollId} &bull; {balanceCheckResult.voter} &bull; Balance: <strong>{balanceCheckResult.balance}</strong>
+                </div>
+              )}
+            </section>
+          </div>
+        </div>
+      )}
+
+      {/* ═══════════════════════════════════════════════════════════════ */}
+      {/* TAB: Poll Settings                                             */}
+      {/* ═══════════════════════════════════════════════════════════════ */}
+      {addr && (isOwner || isFranchisee) && activeTab === 'settings' && polls.length > 0 && (
+        <div className="admin-tab-content">
+          <div className="admin-tab-grid">
+            {/* Voting Modes */}
+            <section className="panel-card">
+              <div className="panel-head">
+                <h3>Voting Modes</h3>
+              </div>
+
+              <form onSubmit={enableSecretBallotForPoll} className="form-stack">
+                <label className="form-label">Secret Ballot <span className="muted small">(commit-reveal)</span></label>
+                <PollSelect
+                  value={secretBallotPollId}
+                  onChange={e => setSecretBallotPollId(e.target.value)}
+                  filterFn={p => !p.ended && !p.isSecretBallot}
+                />
+                <label className="form-label">Reveal Duration <span className="muted small">(minutes, default 60)</span></label>
+                <input
+                  type="number"
+                  className="input"
+                  placeholder="60"
+                  min="1"
+                  value={revealDurationMinutes}
+                  onChange={e => setRevealDurationMinutes(e.target.value)}
+                />
+                <button type="submit" className="btn secondary" disabled={loading}>
+                  {loading ? 'Enabling...' : 'Enable Secret Ballot'}
+                </button>
+              </form>
+
+              <hr style={{ margin: '16px 0', opacity: 0.1 }} />
+
+              <form onSubmit={enableQuadraticForPoll} className="form-stack">
+                <label className="form-label">Quadratic Voting <span className="muted small">(cost = votes²)</span></label>
+                <PollSelect
+                  value={quadraticPollId}
+                  onChange={e => setQuadraticPollId(e.target.value)}
+                  filterFn={p => !p.ended && !p.quadraticEnabled}
+                />
+                <button type="submit" className="btn secondary" disabled={loading}>
+                  {loading ? 'Enabling...' : 'Enable Quadratic Voting'}
+                </button>
+              </form>
+
+              <hr style={{ margin: '16px 0', opacity: 0.1 }} />
+
+              <form onSubmit={setMaxChoicesForPoll} className="form-stack">
+                <label className="form-label">Multi-Choice Voting</label>
+                <PollSelect
+                  value={multiChoicePollId}
+                  onChange={e => setMultiChoicePollId(e.target.value)}
+                  filterFn={p => !p.ended}
+                />
+                <input
+                  type="number" min="2" placeholder="Max choices per voter"
+                  value={maxChoices} onChange={e => setMaxChoices(e.target.value)} className="form-input"
+                />
+                <button type="submit" className="btn secondary" disabled={loading}>
+                  {loading ? 'Setting...' : 'Set Max Choices'}
+                </button>
+              </form>
+            </section>
+
+            {/* Poll Metadata */}
+            <section className="panel-card">
+              <div className="panel-head">
+                <h3>Poll Metadata</h3>
+              </div>
+              <form onSubmit={setPollMetadataURI} className="form-stack">
+                <PollSelect
+                  value={metadataPollId}
+                  onChange={e => setMetadataPollId(e.target.value)}
+                />
+                <input
+                  type="text" placeholder="Metadata URI (e.g. ipfs://... or https://...)"
+                  value={metadataURI} onChange={e => setMetadataURI(e.target.value)} className="form-input"
+                />
+                <button type="submit" className="btn secondary" disabled={loading}>
+                  {loading ? 'Setting...' : 'Set Metadata'}
+                </button>
+              </form>
+            </section>
+
+            {/* Transfer Franchise (franchisee page only) */}
+            {isFranchiseeRole && isFranchisee && !isOwner && myFranchise && (
+              <section className="panel-card">
+                <div className="panel-head">
+                  <h3>Transfer Franchise</h3>
+                </div>
+                {myFranchise.transferRequest.pending ? (
+                  <div className="info-banner">
+                    <div className="muted small">
+                      <strong>Transfer pending</strong><br />
+                      To: {myFranchise.transferRequest.newFranchisee}<br />
+                      Fee paid: {myFranchise.transferRequest.feePaid} ETH<br />
+                      Awaiting owner approval.
+                    </div>
+                  </div>
+                ) : (
+                  <form onSubmit={handleRequestTransfer} className="form-stack">
+                    <input
+                      type="text" placeholder="New Franchisee Address"
+                      value={transferToAddress} onChange={e => setTransferToAddress(e.target.value)}
+                      className="form-input"
+                    />
+                    <div className="muted small">Transfer fee: {transferFee} ETH (paid with this transaction)</div>
+                    <button type="submit" className="btn secondary" disabled={loading}>
+                      {loading ? 'Requesting...' : 'Request Transfer'}
+                    </button>
+                  </form>
+                )}
+              </section>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* ═══════════════════════════════════════════════════════════════ */}
+      {/* TAB: Franchises                                                */}
+      {/* ═══════════════════════════════════════════════════════════════ */}
+      {addr && (isOwner || isFranchisee) && activeTab === 'franchises' && (
+        <div className="admin-tab-content">
+
+          {/* ── Franchisee View (non-owner franchisee) ────────────────── */}
+          {isFranchisee && !isOwner && myFranchise && (
+            <>
+              <div className="admin-tab-grid">
+                {/* My Franchise Details */}
+                <section className="panel-card">
+                  <div className="panel-head">
+                    <h3>My Franchise #{myFranchiseId}</h3>
+                    <span className={`chip ${!myFranchise.expired && !myFranchise.exhausted ? 'chip-success' : 'chip-warning'}`}>
+                      {myFranchise.expired ? 'Expired' : myFranchise.exhausted ? 'Exhausted' : 'Active'}
+                    </span>
+                  </div>
+                  <div className="meta-list">
+                    <div><span>Franchisee</span><strong style={{ wordBreak: 'break-all', fontSize: 12 }}>{myFranchise.franchisee}</strong></div>
+                    <div><span>Expires</span><strong>{new Date(myFranchise.expiresAt * 1000).toLocaleString()}</strong></div>
+                    <div><span>Polls Used</span><strong>{myFranchise.pollsUsed} / {myFranchise.maxPolls}</strong></div>
+                    <div><span>Remaining Polls</span><strong>{myFranchise.maxPolls - myFranchise.pollsUsed}</strong></div>
+                    <div><span>Fee Per Poll</span><strong>{myFranchise.feePerPoll === '0.0' ? 'Free' : `${myFranchise.feePerPoll} ETH`}</strong></div>
+                  </div>
+                  <div style={{ marginTop: 12 }}>
+                    <button className="btn btn-sm secondary" onClick={loadFranchises} disabled={loading}>Refresh</button>
+                  </div>
+                </section>
+
+                {/* Quick Links */}
+                <section className="panel-card">
+                  <div className="panel-head">
+                    <h3>Quick Actions</h3>
+                  </div>
+                  <div className="form-stack">
+                    <button className="btn" onClick={() => setActiveTab('create')} disabled={myFranchise.exhausted || myFranchise.expired}>
+                      + Create New Poll
+                    </button>
+                    <button className="btn secondary" onClick={() => setActiveTab('participants')}>
+                      Manage Candidates & Voters
+                    </button>
+                    <button className="btn secondary" onClick={() => setActiveTab('settings')}>
+                      Poll Settings
+                    </button>
+                  </div>
+                </section>
+              </div>
+
+              {/* Request Transfer */}
+              <section className="panel-card" style={{ marginTop: 'var(--grid-gap)' }}>
+                <div className="panel-head">
+                  <h3>Transfer Franchise</h3>
+                </div>
+                {myFranchise.transferRequest.pending ? (
+                  <div className="info-banner">
+                    <div className="muted small">
+                      <strong>Transfer pending</strong><br />
+                      To: {myFranchise.transferRequest.newFranchisee}<br />
+                      Fee paid: {myFranchise.transferRequest.feePaid} ETH<br />
+                      Awaiting owner approval.
+                    </div>
+                  </div>
+                ) : (
+                  <form onSubmit={handleRequestTransfer} className="form-stack">
+                    <input
+                      type="text" placeholder="New Franchisee Address"
+                      value={transferToAddress} onChange={e => setTransferToAddress(e.target.value)}
+                      className="form-input"
+                    />
+                    <div className="muted small">Transfer fee: {transferFee} ETH (paid with this transaction)</div>
+                    <button type="submit" className="btn secondary" disabled={loading}>
+                      {loading ? 'Requesting...' : 'Request Transfer'}
+                    </button>
+                  </form>
+                )}
+              </section>
+            </>
+          )}
+
+          {/* ── Franchisee notice for non-franchisee non-owner ──────── */}
+          {!isFranchisee && !isOwner && (
+            <div className="empty-state">
+              You don't have a franchise. Contact the contract owner to be granted one.
+            </div>
+          )}
+
+          {/* ── Owner View ────────────────────────────────────────────── */}
+          {isOwner && (
+            <>
+              <div className="admin-tab-grid">
+                {/* Grant Franchise */}
+                <section className="panel-card">
+                  <div className="panel-head">
+                    <h3>Grant Franchise</h3>
+                  </div>
+                  <form onSubmit={handleGrantFranchise} className="form-stack">
+                    <input
+                      type="text" placeholder="Franchisee Address"
+                      value={grantFranchisee} onChange={e => setGrantFranchisee(e.target.value)}
+                      className="form-input"
+                    />
+                    <label className="form-label">Duration (seconds)</label>
+                    <input
+                      type="number" min="1" placeholder="Duration (seconds)"
+                      value={grantDuration} onChange={e => setGrantDuration(e.target.value)}
+                      className="form-input"
+                    />
+                    <div className="muted small">Suggested: 2592000 (30 days), 7776000 (90 days), 31536000 (1 year)</div>
+                    <label className="form-label">Max Polls</label>
+                    <input
+                      type="number" min="1" placeholder="Maximum polls"
+                      value={grantMaxPolls} onChange={e => setGrantMaxPolls(e.target.value)}
+                      className="form-input"
+                    />
+                    <label className="form-label">Fee Per Poll (ETH, 0 = free)</label>
+                    <input
+                      type="text" placeholder="Fee per poll in ETH (e.g. 0.01, 0 = free)"
+                      value={grantFeePerPoll} onChange={e => setGrantFeePerPoll(e.target.value)}
+                      className="form-input"
+                    />
+                    <label className="form-label">Custom VotingPaymaster <span className="muted small">(optional, blank = use global)</span></label>
+                    <input
+                      type="text" placeholder="0x... (leave blank for default gas sponsor)"
+                      value={grantPaymaster} onChange={e => setGrantPaymaster(e.target.value)}
+                      className="form-input"
+                    />
+                    <div className="muted small">If set, this franchisee's polls will use the specified paymaster for gasless vote sponsorship instead of the global one.</div>
+                    <button type="submit" className="btn" disabled={loading}>
+                      {loading ? 'Granting...' : 'Grant Franchise'}
+                    </button>
+                  </form>
+                  <hr style={{ margin: '16px 0', opacity: 0.1 }} />
+                  <div className="panel-head" style={{ marginBottom: 8 }}>
+                    <h4>Add Polls to Franchise</h4>
+                  </div>
+                  <form onSubmit={handleAddPolls} className="form-stack">
+                    <select
+                      value={addPollsFranchiseId}
+                      onChange={e => setAddPollsFranchiseId(e.target.value)}
+                      className="form-input"
+                    >
+                      <option value="">Select Franchise</option>
+                      {franchises.map(f => (
+                        <option key={f.id} value={f.id}>
+                          #{f.id}: {f.franchisee.slice(0, 8)}... ({f.pollsUsed}/{f.maxPolls} used)
+                        </option>
+                      ))}
+                    </select>
+                    <input
+                      type="number" min="1" placeholder="Additional polls to add"
+                      value={addPollsCount} onChange={e => setAddPollsCount(e.target.value)}
+                      className="form-input"
+                    />
+                    <button type="submit" className="btn secondary" disabled={loading}>
+                      {loading ? 'Adding...' : 'Add Polls'}
+                    </button>
+                  </form>
+                </section>
+
+                {/* Transfer Fee & Withdraw */}
+                <section className="panel-card">
+                  <div className="panel-head">
+                    <h3>Fees & Revenue</h3>
+                  </div>
+                  <div className="meta-list">
+                    <div>
+                      <span>Current Transfer Fee</span>
+                      <strong>{transferFee} ETH</strong>
+                    </div>
+                    <div>
+                      <span>FranchiseManager Address</span>
+                      <strong style={{ fontSize: 12 }}>{franchiseManagerAddr || 'Loading...'}</strong>
+                    </div>
+                  </div>
+                  <form onSubmit={handleSetTransferFee} className="form-stack">
+                    <input
+                      type="text" placeholder="New transfer fee (ETH)"
+                      value={newTransferFee} onChange={e => setNewTransferFee(e.target.value)}
+                      className="form-input"
+                    />
+                    <button type="submit" className="btn secondary" disabled={loading}>
+                      {loading ? 'Setting...' : 'Set Transfer Fee'}
+                    </button>
+                  </form>
+                  <hr style={{ margin: '16px 0', opacity: 0.1 }} />
+                  <div className="meta-list" style={{ marginBottom: '12px' }}>
+                    <div className="meta-item">
+                      <span>Accumulated Fees</span>
+                      <strong>{fmBalance} ETH</strong>
+                    </div>
+                  </div>
+                  <button className="btn" onClick={handleWithdrawFees} disabled={loading || fmBalance === '0.0' || fmBalance === '0'}>
+                    {loading ? 'Withdrawing...' : `Withdraw All Fees (${fmBalance} ETH)`}
+                  </button>
+                </section>
+              </div>
+
+              {/* Owner's own franchise (if owner is also a franchisee) */}
+              {isFranchisee && myFranchise && (
+                <section className="panel-card" style={{ marginTop: 'var(--grid-gap)' }}>
+                  <div className="panel-head">
+                    <h3>My Franchise #{myFranchiseId}</h3>
+                    <span className={`chip ${!myFranchise.expired && !myFranchise.exhausted ? 'chip-success' : 'chip-warning'}`}>
+                      {myFranchise.expired ? 'Expired' : myFranchise.exhausted ? 'Exhausted' : 'Active'}
+                    </span>
+                  </div>
+                  <div className="meta-list">
+                    <div><span>Polls Used</span><strong>{myFranchise.pollsUsed} / {myFranchise.maxPolls}</strong></div>
+                    <div><span>Remaining</span><strong>{myFranchise.maxPolls - myFranchise.pollsUsed}</strong></div>
+                    <div><span>Expires</span><strong>{new Date(myFranchise.expiresAt * 1000).toLocaleString()}</strong></div>
+                  </div>
+                </section>
+              )}
+
+              {/* Franchise List */}
+              {franchises.length > 0 && (
+                <section className="panel-card panel-card--wide" style={{ marginTop: 'var(--grid-gap)' }}>
+                  <div className="panel-head">
+                    <h3>Franchises ({filteredFranchises.length} of {franchises.length})</h3>
+                    <button className="btn btn-sm secondary" onClick={loadFranchises} disabled={loading}>Refresh</button>
+                  </div>
+
+                  <SearchBar
+                    searchTerm={franchiseSearch}
+                    onSearchChange={setFranchiseSearch}
+                    placeholder="Search by address or ID…"
+                  />
+
+                  <div className="data-table-wrap">
+                    <table className="data-table">
+                      <thead>
+                        <tr>
+                          <th>#</th>
+                          <th>Franchisee</th>
+                          <th>Status</th>
+                          <th>Expires</th>
+                          <th>Polls Used</th>
+                          <th>Remaining</th>
+                          <th>Fee/Poll</th>
+                          <th>Transfer</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {franchisesPage.map(f => {
+                          const isActive = !f.expired && !f.exhausted;
+                          const remaining = f.maxPolls - f.pollsUsed;
+                          return (
+                            <tr key={f.id}>
+                              <td>{f.id}</td>
+                              <td className="muted small" style={{ maxWidth: 140, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{f.franchisee}</td>
+                              <td><span className={`chip ${isActive ? 'chip-success' : 'chip-warning'}`}>{f.expired ? 'Expired' : f.exhausted ? 'Exhausted' : 'Active'}</span></td>
+                              <td>{new Date(f.expiresAt * 1000).toLocaleDateString()}</td>
+                              <td>{f.pollsUsed} / {f.maxPolls}</td>
+                              <td>{remaining}</td>
+                              <td>{f.feePerPoll} ETH</td>
+                              <td>
+                                {f.transferRequest.pending ? (
+                                  <div style={{ display: 'flex', gap: '0.25rem', flexWrap: 'wrap', alignItems: 'center' }}>
+                                    <span className="muted small">To: {f.transferRequest.newFranchisee.slice(0, 8)}…</span>
+                                    <button className="btn btn-sm" onClick={() => handleApproveTransfer(f.id)} disabled={loading}>Approve</button>
+                                    <button className="btn btn-sm secondary" onClick={() => handleRejectTransfer(f.id)} disabled={loading}>Reject</button>
+                                  </div>
+                                ) : (
+                                  <span className="muted small">—</span>
+                                )}
+                              </td>
+                            </tr>
+                          );
+                        })}
+                        {franchisesPage.length === 0 && (
+                          <tr><td colSpan="8" style={{ textAlign: 'center', padding: '1.5rem' }}>No franchises match your search.</td></tr>
+                        )}
+                      </tbody>
+                    </table>
+                  </div>
+
+                  <Pagination
+                    totalItems={filteredFranchises.length}
+                    page={franchisePage}
+                    pageSize={franchisePageSize}
+                    onPageChange={setFranchisePage}
+                    onPageSizeChange={(s) => { setFranchisePageSize(s); setFranchisePage(1); }}
+                  />
+                </section>
+              )}
+
+              {franchises.length === 0 && (
+                <div className="empty-state" style={{ marginTop: 'var(--grid-gap)' }}>
+                  No franchises granted yet. Use the form above to grant one.
+                </div>
+              )}
+            </>
+          )}
+        </div>
+      )}
+
+      {/* ═══════════════════════════════════════════════════════════════ */}
+      {/* TAB: Infrastructure                                            */}
+      {/* ═══════════════════════════════════════════════════════════════ */}
+      {addr && isOwner && activeTab === 'infra' && (
+        <div className="admin-tab-content">
+          <div className="admin-tab-grid">
+            {/* Ownership */}
+            <section className="panel-card">
+              <div className="panel-head">
+                <h3>Ownership</h3>
+                <span className="chip">{isOwner ? 'Owner' : isPendingOwner ? 'Pending' : 'Viewer'}</span>
+              </div>
+              <div className="meta-list">
+                <div>
+                  <span>Current owner</span>
+                  <strong>{ownerAddress || 'Unknown'}</strong>
+                </div>
+                <div>
+                  <span>Pending owner</span>
+                  <strong>{pendingOwner && pendingOwner !== ethers.ZeroAddress ? pendingOwner : 'None'}</strong>
+                </div>
+              </div>
+
               <form onSubmit={startOwnershipTransfer} className="form-stack">
                 <input
                   type="text"
@@ -1190,510 +2993,149 @@ export default function AdminPanel({ mode = 'production' }) {
                     {loading ? 'Submitting...' : 'Start Transfer'}
                   </button>
                   {pendingOwner && pendingOwner !== ethers.ZeroAddress && (
-                    <button
-                      type="button"
-                      className="btn secondary"
-                      onClick={cancelOwnershipTransfer}
-                      disabled={loading}
-                    >
+                    <button type="button" className="btn secondary" onClick={cancelOwnershipTransfer} disabled={loading}>
                       {loading ? 'Canceling...' : 'Cancel Transfer'}
                     </button>
                   )}
                 </div>
               </form>
-            )}
 
-            {pendingOwner && pendingOwner !== ethers.ZeroAddress && (
-              <div className="form-actions">
-                <button className="btn" onClick={acceptOwnership} disabled={loading || !isPendingOwner}>
-                  {loading ? 'Accepting...' : 'Accept Ownership'}
-                </button>
-                {!isPendingOwner && (
-                  <div className="muted small">Connect with the pending owner address to accept ownership.</div>
-                )}
-              </div>
-            )}
-          </section>
-        )}
-
-        {addr && isOwner && (
-          <section className="panel-card">
-            <div className="panel-head">
-              <h3>Create New Poll</h3>
-              <span className="chip">Owner only</span>
-            </div>
-            <form onSubmit={createPoll} className="form-stack">
-              <input
-                type="text"
-                placeholder="Poll Title"
-                value={pollTitle}
-                onChange={e => setPollTitle(e.target.value)}
-                className="form-input"
-              />
-              <input
-                type="text"
-                placeholder="Admin Address (leave empty to use your address)"
-                value={pollAdmin}
-                onChange={e => setPollAdmin(e.target.value)}
-                className="form-input"
-              />
-              <input
-                type="datetime-local"
-                value={pollStartTime}
-                onChange={e => setPollStartTime(e.target.value)}
-                className="form-input"
-              />
-              <div className="muted small">Leave blank to start immediately. Selected time is your local time and will be converted to UTC automatically.</div>
-              {pollStartTime && (
-                <div className="muted small">
-                  You selected local time: {previewStartTs ? new Date(previewStartTs * 1000).toLocaleString() : 'Invalid date'}
-                  {previewStartOffset ? ` (${previewStartOffset})` : ''}
-                  {previewStartUtc ? ` → submitted as UTC: ${previewStartUtc}` : ''}
-                </div>
-              )}
-              <input
-                type="number"
-                placeholder="Duration (seconds)"
-                value={pollDuration}
-                onChange={e => setPollDuration(e.target.value)}
-                className="form-input"
-              />
-              <div className="muted small">Suggested: 300 (5 min), 3600 (1 hour), 86400 (1 day)</div>
-              <label className="muted small" style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                <input
-                  type="checkbox"
-                  checked={enableTokenVoting}
-                  onChange={e => {
-                    const enabled = e.target.checked;
-                    setEnableTokenVoting(enabled);
-                    if (!enabled) {
-                      setRequireTokenVoting(false);
-                    }
-                  }}
-                />
-                Enable token voting for this poll
-              </label>
-              <label className="muted small" style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                <input
-                  type="checkbox"
-                  checked={requireTokenVoting}
-                  disabled={!enableTokenVoting}
-                  onChange={e => {
-                    const required = e.target.checked;
-                    setRequireTokenVoting(required);
-                    if (required) {
-                      setEnableTokenVoting(true);
-                    }
-                  }}
-                />
-                Require token voting (voters must spend voting tokens)
-              </label>
-              <input
-                type="number"
-                min="1"
-                placeholder="Tokens per voter"
-                value={tokensPerVoter}
-                onChange={e => setTokensPerVoter(e.target.value)}
-                className="form-input"
-                disabled={!enableTokenVoting}
-              />
-              <label className="muted small" style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                <input
-                  type="checkbox"
-                  checked={allowGaslessVoting}
-                  disabled={!enableTokenVoting}
-                  onChange={e => setAllowGaslessVoting(e.target.checked)}
-                />
-                Allow gasless token voting (requires owner to set a paymaster)
-              </label>
-              <button type="submit" className="btn" disabled={loading}>
-                {loading ? 'Creating...' : 'Create Poll'}
-              </button>
-            </form>
-          </section>
-        )}
-
-        {addr && isOwner && (
-          <section className="panel-card">
-            <div className="panel-head">
-              <h3>Gas Sponsorship</h3>
-              <span className="chip">Owner only</span>
-            </div>
-            <div className="meta-list">
-              <div>
-                <span>Paymaster status</span>
-                <strong>
-                  <span
-                    className={`chip ${
-                      paymasterStatus.configured
-                        ? paymasterStatus.deployed
-                          ? 'chip-success'
-                          : 'chip-warning'
-                        : ''
-                    }`}
-                  >
-                    {!paymasterStatus.configured
-                      ? 'Not configured'
-                      : paymasterStatus.deployed
-                      ? 'Configured & active'
-                      : 'Configured but contract not deployed'}
-                  </span>
-                </strong>
-              </div>
-              <div>
-                <span>Network</span>
-                <strong>
-                  {paymasterStatus.networkName}
-                  {Number.isFinite(paymasterStatus.chainId) ? ` (${paymasterStatus.chainId})` : ''}
-                </strong>
-              </div>
-            </div>
-            <form onSubmit={setVotingPaymaster} className="form-stack">
-              <input
-                type="text"
-                placeholder="Voting Paymaster Address"
-                value={paymasterAddress}
-                onChange={e => setPaymasterAddress(e.target.value)}
-                className="form-input"
-              />
-              <div className="muted small">
-                Set this to enable sponsor-paid gas for polls configured with "Allow gasless token voting".
-              </div>
-              {paymasterStatus.configured && !paymasterStatus.deployed && (
-                <div className="muted small">
-                  Warning: this paymaster address has no contract code on the current network.
-                </div>
-              )}
-              <button type="submit" className="btn" disabled={loading}>
-                {loading ? 'Saving...' : 'Set Voting Paymaster'}
-              </button>
-            </form>
-          </section>
-        )}
-
-        {addr && isOwner && polls.length > 0 && (
-          <section className="panel-card">
-            <div className="panel-head">
-              <h3>Add Candidate</h3>
-            </div>
-            <form onSubmit={addCandidate} className="form-stack">
-              <select
-                value={selectedPollId}
-                onChange={e => setSelectedPollId(e.target.value)}
-                className="form-input"
-              >
-                <option value="">Select Poll</option>
-                {polls.filter(p => !p.ended).map(poll => (
-                  <option key={poll.id} value={poll.id}>
-                    Poll #{poll.id}: {poll.title}
-                  </option>
-                ))}
-              </select>
-              <input
-                type="text"
-                placeholder="Candidate Name"
-                value={candidateName}
-                onChange={e => setCandidateName(e.target.value)}
-                className="form-input"
-              />
-              <button type="submit" className="btn" disabled={loading}>
-                {loading ? 'Adding...' : 'Add Candidate'}
-              </button>
-            </form>
-          </section>
-        )}
-
-        {addr && isOwner && polls.length > 0 && (
-          <section className="panel-card">
-            <div className="panel-head">
-              <h3>Add Voters</h3>
-            </div>
-            <form onSubmit={addVoters} className="form-stack">
-              <select
-                value={voterPollId}
-                onChange={e => setVoterPollId(e.target.value)}
-                className="form-input"
-              >
-                <option value="">Select Poll</option>
-                {polls.filter(p => !p.ended).map(poll => (
-                  <option key={poll.id} value={poll.id}>
-                    Poll #{poll.id}: {poll.title}
-                  </option>
-                ))}
-              </select>
-              <textarea
-                placeholder="Voter Addresses (comma-separated)"
-                value={voterAddresses}
-                onChange={e => setVoterAddresses(e.target.value)}
-                rows={4}
-                className="form-input form-textarea"
-              />
-              {voterPollId && (() => {
-                const selectedPoll = polls.find(p => String(p.id) === String(voterPollId));
-                if (!selectedPoll?.tokenConfig?.enabled) return null;
-
-                return (
-                  <>
-                    <div className="muted small">
-                      Token voting enabled for this poll.
-                      {selectedPoll.tokenConfig.tokenRequired ? ' Token vote is required.' : ' Token vote is optional.'}
-                      {' '}Configured tokens per voter: {selectedPoll.tokenConfig.tokensPerVoter || 0}
-                      {selectedPoll.tokenConfig.allowGaslessVoting ? ' • Gasless enabled' : ''}
-                    </div>
-                    <input
-                      type="number"
-                      min="1"
-                      placeholder="Fallback tokens per voter"
-                      value={voterTokensPerVoter}
-                      onChange={e => setVoterTokensPerVoter(e.target.value)}
-                      className="form-input"
-                    />
-                  </>
-                );
-              })()}
-              {mode === 'local' && (
-                <button
-                  type="button"
-                  className="btn ghost"
-                  onClick={copyVoterAddresses}
-                >
-                  Copy Test Voter Addresses (Accounts #1, #2, #3, #4)
-                </button>
-              )}
-              <button type="submit" className="btn" disabled={loading}>
-                {loading ? 'Adding...' : 'Add Voters'}
-              </button>
-            </form>
-          </section>
-        )}
-
-        {addr && isOwner && polls.length > 0 && (
-          <section className="panel-card">
-            <div className="panel-head">
-              <h3>Top Up Tokens</h3>
-            </div>
-            <form onSubmit={topUpVotingTokens} className="form-stack">
-              <select
-                value={topUpPollId}
-                onChange={e => setTopUpPollId(e.target.value)}
-                className="form-input"
-              >
-                <option value="">Select Poll</option>
-                {polls.filter(p => !p.ended).map(poll => (
-                  <option key={poll.id} value={poll.id}>
-                    Poll #{poll.id}: {poll.title}
-                  </option>
-                ))}
-              </select>
-              <textarea
-                placeholder="Voter Addresses (comma-separated)"
-                value={topUpVoterAddresses}
-                onChange={e => setTopUpVoterAddresses(e.target.value)}
-                rows={4}
-                className="form-input form-textarea"
-              />
-              <input
-                type="number"
-                min="1"
-                placeholder="Top-up tokens per voter"
-                value={topUpAmountPerVoter}
-                onChange={e => setTopUpAmountPerVoter(e.target.value)}
-                className="form-input"
-              />
-              <button type="submit" className="btn" disabled={loading}>
-                {loading ? 'Topping Up...' : 'Top Up Tokens'}
-              </button>
-            </form>
-
-            <form onSubmit={checkVoterTokenBalance} className="form-stack" style={{ marginTop: 14 }}>
-              <select
-                value={balanceCheckPollId}
-                onChange={e => setBalanceCheckPollId(e.target.value)}
-                className="form-input"
-              >
-                <option value="">Select Poll (Balance Check)</option>
-                {polls.map(poll => (
-                  <option key={poll.id} value={poll.id}>
-                    Poll #{poll.id}: {poll.title}
-                  </option>
-                ))}
-              </select>
-              <input
-                type="text"
-                placeholder="Voter Address for balance check"
-                value={balanceCheckVoterAddress}
-                onChange={e => setBalanceCheckVoterAddress(e.target.value)}
-                className="form-input"
-              />
-              <button type="submit" className="btn secondary" disabled={loading}>
-                {loading ? 'Checking...' : 'Check Token Balance'}
-              </button>
-            </form>
-
-            {balanceCheckResult && (
-              <div className="muted small" style={{ marginTop: 10 }}>
-                Poll #{balanceCheckResult.pollId} • {balanceCheckResult.voter} • Token balance: {balanceCheckResult.balance}
-              </div>
-            )}
-          </section>
-        )}
-      </div>
-
-      {addr && isOwner && polls.length > 0 && (
-        <section className="panel-card panel-card--wide">
-          <div className="panel-head">
-            <h3>Manage Polls</h3>
-          </div>
-          <div className="poll-grid">
-            {polls.map(poll => {
-              const nowTs = Math.floor(Date.now() / 1000);
-              const status = poll.status || { started: true, active: false, ended: poll.ended, revealed: poll.revealed };
-              const hasStartedByTime = poll.startTime ? nowTs >= poll.startTime : true;
-              const hasEndedByTime = poll.endTime ? nowTs >= poll.endTime : false;
-              const isEndedEffective = Boolean(status.ended || hasEndedByTime);
-              const isUpcoming = !isEndedEffective && !hasStartedByTime;
-              const isActiveEffective = !isEndedEffective && (status.active || (hasStartedByTime && !hasEndedByTime));
-              const isPaymasterActive = paymasterStatus.configured && paymasterStatus.deployed;
-              const gaslessStatus = poll.tokenConfig?.allowGaslessVoting
-                ? isPaymasterActive
-                  ? 'Ready'
-                  : 'Not ready'
-                : 'Disabled';
-              const statusLabel = status.revealed
-                ? 'Revealed'
-                : isEndedEffective
-                ? 'Ended'
-                : isActiveEffective
-                ? 'Active'
-                : isUpcoming
-                ? 'Scheduled'
-                : 'Inactive';
-              const timeLabel = isEndedEffective
-                ? 'Ended'
-                : isUpcoming
-                ? formatTimeUntil(poll.startTime)
-                : formatTimeRemaining(poll.endTime);
-
-              return (
-                <div
-                  key={poll.id}
-                  className={`poll-card ${poll.isActive ? 'is-active' : ''} ${poll.ended ? 'is-ended' : ''}`}
-                >
-                  <div className="poll-card__head">
-                    <div>
-                      <h4 className="poll-title">Poll #{poll.id}: {poll.title}</h4>
-                      <div className="muted small">Admin: {poll.admin}</div>
-                    </div>
-                    <span className="chip">
-                      {statusLabel}
-                    </span>
-                  </div>
-                  <div className="poll-meta">
-                    <div>
-                      <span>Status</span>
-                      <strong>{timeLabel}</strong>
-                    </div>
-                    <div>
-                      <span>Starts</span>
-                      <strong>{formatDateTime(poll.startTime)}</strong>
-                    </div>
-                    <div>
-                      <span>Ends</span>
-                      <strong>{formatDateTime(poll.endTime)}</strong>
-                    </div>
-                    <div>
-                      <span>Candidates</span>
-                      <strong>{poll.optionsCount}</strong>
-                    </div>
-                    <div>
-                      <span>Total votes</span>
-                      <strong>{poll.totalVotes}</strong>
-                    </div>
-                    <div>
-                      <span>Results</span>
-                      <strong>{poll.revealed ? 'Revealed' : 'Hidden'}</strong>
-                    </div>
-                    <div>
-                      <span>Gasless</span>
-                      <strong>
-                        <span
-                          className={`chip ${
-                            gaslessStatus === 'Ready'
-                              ? 'chip-success'
-                              : gaslessStatus === 'Not ready'
-                              ? 'chip-warning'
-                              : ''
-                          }`}
-                        >
-                          {gaslessStatus}
-                        </span>
-                      </strong>
-                    </div>
-                  </div>
-                  <div className="poll-actions">
-                    <button
-                      className="btn secondary"
-                      onClick={() => togglePollDetails(poll.id)}
-                    >
-                      {expandedPoll === poll.id ? 'Hide Details' : 'Show Details'}
-                    </button>
-                    {isEndedEffective && !status.revealed && (
-                      <button
-                        className="btn"
-                        onClick={() => revealResults(poll.id)}
-                        disabled={loading}
-                      >
-                        Reveal Results
-                      </button>
-                    )}
-                    {isActiveEffective && (
-                      <button
-                        className="btn"
-                        onClick={() => endPoll(poll.id)}
-                        disabled={loading}
-                      >
-                        End Poll
-                      </button>
-                    )}
-                  </div>
-
-                  {expandedPoll === poll.id && poll.options && (
-                    <div className="poll-options">
-                      <h5>Candidates</h5>
-                      {poll.options.map(option => (
-                        <div key={option.id} className="option-row">
-                          <span>{option.name}</span>
-                          <span className="option-votes">
-                            {poll.revealed ? `${option.votes} votes` : '?'}
-                          </span>
-                        </div>
-                      ))}
-                    </div>
+              {pendingOwner && pendingOwner !== ethers.ZeroAddress && (
+                <div className="form-actions" style={{ marginTop: 10 }}>
+                  <button className="btn" onClick={acceptOwnership} disabled={loading || !isPendingOwner}>
+                    {loading ? 'Accepting...' : 'Accept Ownership'}
+                  </button>
+                  {!isPendingOwner && (
+                    <div className="muted small">Connect with the pending owner address to accept.</div>
                   )}
                 </div>
-              );
-            })}
-          </div>
-        </section>
-      )}
+              )}
+            </section>
 
-      {addr && isOwner && polls.length === 0 && (
-        <div className="empty-state">
-          No polls created yet. {isOwner && 'Create your first poll above!'}
+            {/* Gas Sponsorship */}
+            <section className="panel-card">
+              <div className="panel-head">
+                <h3>Gas Sponsorship</h3>
+              </div>
+              <div className="meta-list">
+                <div>
+                  <span>Paymaster status</span>
+                  <strong>
+                    <span className={`chip ${paymasterStatus.configured ? (paymasterStatus.deployed ? 'chip-success' : 'chip-warning') : ''}`}>
+                      {!paymasterStatus.configured
+                        ? 'Not configured'
+                        : paymasterStatus.deployed
+                        ? 'Configured & active'
+                        : 'Configured but not deployed'}
+                    </span>
+                  </strong>
+                </div>
+                <div>
+                  <span>Network</span>
+                  <strong>
+                    {paymasterStatus.networkName}
+                    {Number.isFinite(paymasterStatus.chainId) ? ` (${paymasterStatus.chainId})` : ''}
+                  </strong>
+                </div>
+              </div>
+              <form onSubmit={setVotingPaymaster} className="form-stack">
+                <input
+                  type="text"
+                  placeholder="Voting Paymaster Address"
+                  value={paymasterAddress}
+                  onChange={e => setPaymasterAddress(e.target.value)}
+                  className="form-input"
+                />
+                <div className="muted small">
+                  Set this to enable sponsor-paid gas for polls with gasless token voting.
+                </div>
+                {paymasterStatus.configured && !paymasterStatus.deployed && (
+                  <div className="muted small" style={{ color: 'var(--danger)' }}>
+                    Warning: this paymaster address has no contract code on the current network.
+                  </div>
+                )}
+                <button type="submit" className="btn" disabled={loading}>
+                  {loading ? 'Saving...' : 'Set Paymaster'}
+                </button>
+              </form>
+            </section>
+
+            {/* Contract Addresses */}
+            <section className="panel-card">
+              <div className="panel-head">
+                <h3>Contract Addresses</h3>
+                <span className={`chip ${infraLocked ? 'chip-warning' : 'chip-success'}`}>
+                  {infraLocked ? 'Locked' : 'Unlocked'}
+                </span>
+              </div>
+
+              <form onSubmit={setSecretBallotManagerAddress} className="form-stack">
+                <label className="form-label">SecretBallotManager</label>
+                <input
+                  type="text" placeholder="SecretBallotManager Address"
+                  value={sbmAddress} onChange={e => setSbmAddress(e.target.value)}
+                  className="form-input" disabled={infraLocked}
+                />
+                <button type="submit" className="btn secondary" disabled={loading || infraLocked}>
+                  {loading ? 'Setting...' : 'Update'}
+                </button>
+              </form>
+
+              <hr style={{ margin: '16px 0', opacity: 0.1 }} />
+
+              <form onSubmit={setTokenManagerAddress} className="form-stack">
+                <label className="form-label">TokenManager</label>
+                <input
+                  type="text" placeholder="TokenManager Address"
+                  value={tokenMgrAddress} onChange={e => setTokenMgrAddress(e.target.value)}
+                  className="form-input" disabled={infraLocked}
+                />
+                <button type="submit" className="btn secondary" disabled={loading || infraLocked}>
+                  {loading ? 'Setting...' : 'Update'}
+                </button>
+              </form>
+
+              <hr style={{ margin: '16px 0', opacity: 0.1 }} />
+
+              <form onSubmit={handleSetFranchiseManager} className="form-stack">
+                <label className="form-label">FranchiseManager</label>
+                <input
+                  type="text" placeholder="FranchiseManager Address"
+                  value={fmAddrInput} onChange={e => setFmAddrInput(e.target.value)}
+                  className="form-input" disabled={infraLocked}
+                />
+                <button type="submit" className="btn secondary" disabled={loading || infraLocked}>
+                  {loading ? 'Setting...' : 'Update'}
+                </button>
+              </form>
+
+              <hr style={{ margin: '16px 0', opacity: 0.1 }} />
+
+              <div className="form-stack">
+                <div className="meta-list">
+                  <div>
+                    <span>Infrastructure Lock</span>
+                    <strong>
+                      <span className={`chip ${infraLocked ? 'chip-warning' : 'chip-success'}`}>
+                        {infraLocked ? 'Locked (permanent)' : 'Unlocked'}
+                      </span>
+                    </strong>
+                  </div>
+                </div>
+                {!infraLocked && (
+                  <>
+                    <div className="muted small" style={{ color: 'var(--danger)' }}>
+                      Locking infrastructure is <strong>irreversible</strong>. It prevents changes to TokenManager, SecretBallotManager, FranchiseManager, and Paymaster addresses.
+                    </div>
+                    <button className="btn secondary" onClick={lockInfra} disabled={loading}>
+                      {loading ? 'Locking...' : 'Lock Infrastructure'}
+                    </button>
+                  </>
+                )}
+              </div>
+            </section>
+          </div>
         </div>
-      )}
-
-      {addr && !isOwner && (
-        <section className="panel-card panel-card--wide">
-          <div className="panel-head">
-            <h3>Admin Access</h3>
-            <span className="chip">Owner only</span>
-          </div>
-          <div className="status-banner status-warning">
-            This section is available only to the contract owner. Switch to the owner account or use the voter page at{' '}
-            <a href={voterPath}>{voterPath}</a>.
-          </div>
-        </section>
       )}
     </div>
   );

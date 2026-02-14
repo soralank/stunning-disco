@@ -1,0 +1,12 @@
+# =============================================================================
+# docker-compose for PRODUCTION (Mainnet)
+# Usage: docker compose -f docker-compose.prod.yml up -d
+# URL:   http://localhost:8080  (put behind a reverse proxy / load balancer)
+# =============================================================================
+
+services:
+  voting-app:
+    image: ghcr.io/${GITHUB_REPOSITORY:-stunning-disco}:prod
+    ports:
+      - "8080:8080"
+    restart: unless-stopped

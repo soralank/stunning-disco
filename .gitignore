@@ -4,6 +4,9 @@ build/
 .env.local
 .env.development
 .env.development.local
+.env.production.local
+.env.test.local
 npm-debug.log
 .DS_Store
 package-lock.json
+.claude/

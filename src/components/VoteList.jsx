@@ -1,6 +1,8 @@
-import React, { useEffect, useState } from 'react';
-import { getProvider, getSigner, getContract, getContractErrorDetails, sendTxWithNonceRetry } from '../contract';
+import React, { useEffect, useState, useMemo } from 'react';
+import { getProvider, getSigner, getContract, getContractErrorDetails, sendTxWithNonceRetry, getSecretBallotManagerContract, getVotingPaymasterContract, getVotingPaymasterAt } from '../contract';
 import { ethers } from 'ethers';
+import Pagination from './Pagination';
+import SearchBar from './SearchBar';
 
 // Read from env or use hardcoded defaults
 const DEFAULT_ACCOUNTS = [
@@ -30,6 +32,53 @@ export default function VoteList({ mode = 'production' }) {
   const [expandedPoll, setExpandedPoll] = useState(null);
   const [walletSigner, setWalletSigner] = useState(null);
   const [selectedAccount, setSelectedAccount] = useState(1);
+  const [, setTick] = useState(0); // Force re-render for live countdown
+
+  // Delegation state
+  const [delegateAddress, setDelegateAddress] = useState('');
+
+  // Secret ballot state
+  const [commitSalt, setCommitSalt] = useState({});   // { pollId: saltHex }
+  const [revealOptionId, setRevealOptionId] = useState({});
+
+  // Quadratic voting state
+  const [quadraticAllocations, setQuadraticAllocations] = useState({}); // { pollId: { optionId: amount } }
+
+  // Multi-choice voting state
+  const [multiChoiceSelections, setMultiChoiceSelections] = useState({}); // { pollId: Set<optionId> }
+
+  // Search & pagination
+  const [voterSearch, setVoterSearch] = useState('');
+  const [voterStatusFilter, setVoterStatusFilter] = useState('all');
+  const [voterPage, setVoterPage] = useState(1);
+  const [voterPageSize, setVoterPageSize] = useState(10);
+
+  const filteredVoterPolls = useMemo(() => {
+    let list = polls;
+    if (voterSearch.trim()) {
+      const q = voterSearch.trim().toLowerCase();
+      list = list.filter(p => p.title.toLowerCase().includes(q) || String(p.id).includes(q));
+    }
+    if (voterStatusFilter !== 'all') {
+      const nowTs = Math.floor(Date.now() / 1000);
+      list = list.filter(p => {
+        const st = p.status || {};
+        const ended = Boolean(st.ended || (p.endTime && nowTs >= p.endTime));
+        const started = p.startTime ? nowTs >= p.startTime : true;
+        if (voterStatusFilter === 'active') return !ended && started;
+        if (voterStatusFilter === 'ended') return ended && !st.revealed;
+        if (voterStatusFilter === 'revealed') return !!st.revealed;
+        if (voterStatusFilter === 'voted') return !!p.hasVoted;
+        return true;
+      });
+    }
+    return list;
+  }, [polls, voterSearch, voterStatusFilter]);
+
+  const voterPollsPage = useMemo(() => {
+    const start = (voterPage - 1) * voterPageSize;
+    return filteredVoterPolls.slice(start, start + voterPageSize);
+  }, [filteredVoterPolls, voterPage, voterPageSize]);
 
   async function connectWallet() {
     setStatus(null);
@@ -64,16 +113,23 @@ export default function VoteList({ mode = 'production' }) {
       setPolls([]);
       setStatus(`Connected with ${account.name}: ${address}`);
 
-      await loadPolls(address);
+      // Pass wallet.provider explicitly since walletSigner state hasn't updated yet
+      await loadPolls(address, wallet.provider);
     } catch (err) {
       setStatus(`Error: ${err.message}`);
     }
   }
 
-  async function loadPolls(voterAddress) {
+  // Use local wallet signer's provider when available (avoids MetaMask intercepting calls in local mode).
+  // Accept an optional explicit provider to avoid stale React state during connect flows.
+  function getEffectiveProvider(explicitProvider) {
+    return explicitProvider || walletSigner?.provider || getProvider();
+  }
+
+  async function loadPolls(voterAddress, explicitProvider) {
     setLoading(true);
     try {
-      const provider = getProvider();
+      const provider = getEffectiveProvider(explicitProvider);
       const contract = getContract(provider);
       
       let pollsCount = 0;
@@ -104,6 +160,7 @@ export default function VoteList({ mode = 'production' }) {
 
       console.log('Loading polls for voter:', voterAddress, '- Total polls:', pollsCount);
       const pollsData = [];
+      let skippedNotAuthorized = 0;
 
       for (let i = 1; i <= pollsCount; i++) {
         try {
@@ -190,29 +247,83 @@ export default function VoteList({ mode = 'production' }) {
 
           const isExpired = status.ended;
 
-          if (isAuthorized && !isExpired) {
-            pollsData.push({
-              id: i,
-              title: poll.title,
-              admin: poll.admin,
-              startTime,
-              endTime,
-              revealed: status.revealed,
-              ended: status.ended,
-              status,
-              hasVoted,
-              totalVotes: Number(totalVotes),
-              optionsCount: Number(optionsCount),
-              tokenConfig,
-              voterTokenBalance
-            });
+          if (!isAuthorized) {
+            skippedNotAuthorized++;
+            continue;
+          }
+
+          // Skip revealed polls — voters can view those in the Results section
+          if (status.revealed) {
+            continue;
+          }
+
+          pollsData.push({
+            id: i,
+            title: poll.title,
+            admin: poll.admin,
+            startTime,
+            endTime,
+            revealed: status.revealed,
+            ended: status.ended,
+            status,
+            hasVoted,
+            totalVotes: Number(totalVotes),
+            optionsCount: Number(optionsCount),
+            tokenConfig,
+            voterTokenBalance
+          });
+
+          // Augment with new feature flags
+          const lastPoll = pollsData[pollsData.length - 1];
+          try { lastPoll.isSecretBallot = await contract.secretBallot(i); } catch { lastPoll.isSecretBallot = false; }
+          try { lastPoll.quadraticEnabled = await contract.quadraticVotingEnabled(i); } catch { lastPoll.quadraticEnabled = false; }
+          try { lastPoll.maxChoices = Number(await contract.pollMaxChoices(i)); } catch { lastPoll.maxChoices = 0; }
+          try { lastPoll.metadataURI = await contract.getPollMetadata(i); } catch { lastPoll.metadataURI = ''; }
+          try {
+            const pmAddr = await contract.pollVotingPaymaster(i);
+            lastPoll.pollPaymaster = (pmAddr && pmAddr !== ethers.ZeroAddress) ? pmAddr : null;
+          } catch { lastPoll.pollPaymaster = null; }
+
+          // Delegation info
+          try {
+            const delegInfo = await contract.getDelegationInfo(i, voterAddress);
+            lastPoll.delegation = {
+              delegatee: delegInfo.delegatee || delegInfo[0],
+              isDelegated: delegInfo.isDelegated ?? delegInfo[1],
+              delegationsReceived: Number(delegInfo.delegationsReceived ?? delegInfo[2] ?? 0)
+            };
+          } catch { lastPoll.delegation = null; }
+
+          // Secret ballot voter status
+          if (lastPoll.isSecretBallot) {
+            try {
+              const sbmContract = getSecretBallotManagerContract(provider);
+              lastPoll.hasCommitted = await sbmContract.hasCommitted(i, voterAddress);
+              lastPoll.hasRevealed = await sbmContract.hasRevealed(i, voterAddress);
+              const sbStatus = await sbmContract.getSecretBallotStatus(i);
+              lastPoll.sbStatus = {
+                commits: Number(sbStatus.commits ?? sbStatus[0]),
+                reveals: Number(sbStatus.reveals ?? sbStatus[1]),
+                inCommitPhase: sbStatus.inCommitPhase ?? sbStatus[3],
+                inRevealPhase: sbStatus.inRevealPhase ?? sbStatus[4]
+              };
+              try { lastPoll.revealDeadline = Number(await sbmContract.getRevealDeadline(i)); } catch { lastPoll.revealDeadline = 0; }
+            } catch (sbErr) {
+              console.warn('SBM status error for poll', i, sbErr.message);
+              lastPoll.hasCommitted = false;
+              lastPoll.hasRevealed = false;
+              lastPoll.sbStatus = null;
+            }
           }
         } catch (pollErr) {
           console.warn(`Failed to load poll #${i}:`, pollErr.message);
         }
       }
 
-      console.log('Found', pollsData.length, 'authorized polls for this voter');
+      console.log(`Found ${pollsData.length} authorized polls for this voter (${skippedNotAuthorized} not authorized, ${pollsCount} total on-chain)`);
+      if (pollsData.length === 0 && pollsCount > 0) {
+        console.warn('Polls exist on-chain but none are visible. The admin needs to authorize this address as a voter.');
+      }
       setPolls(pollsData);
     } catch (err) {
       setStatus(`Error loading polls: ${err.message}`);
@@ -223,7 +334,7 @@ export default function VoteList({ mode = 'production' }) {
 
   async function loadPollOptions(pollId) {
     try {
-      const provider = getProvider();
+      const provider = getEffectiveProvider();
       const contract = getContract(provider);
       const optionsCount = await contract.getOptionsCount(pollId);
       const options = [];
@@ -246,7 +357,7 @@ export default function VoteList({ mode = 'production' }) {
 
   async function loadWinner(pollId) {
     try {
-      const provider = getProvider();
+      const provider = getEffectiveProvider();
       const contract = getContract(provider);
       const winner = await contract.getWinner(pollId);
 
@@ -294,8 +405,8 @@ export default function VoteList({ mode = 'production' }) {
       try {
         const rawPoll = await contract.polls(pollId);
         tokenFlagsFromPoll = {
-          enabled: Boolean(rawPoll?.tokenVotingEnabled ?? rawPoll?.[8] ?? false),
-          required: Boolean(rawPoll?.tokenVotingRequired ?? rawPoll?.[9] ?? false)
+          enabled: Boolean(rawPoll?.tokenVotingEnabled ?? rawPoll?.[9] ?? false),
+          required: Boolean(rawPoll?.tokenVotingRequired ?? rawPoll?.[10] ?? false)
         };
       } catch {
       }
@@ -362,8 +473,349 @@ export default function VoteList({ mode = 'production' }) {
       }
     } catch (err) {
       const details = getContractErrorDetails(err, contract);
+      const msg = details.description || err.message || String(err);
+      if (msg.includes('missing revert data')) {
+        setStatus('Error: Transaction reverted. The poll may not be active yet, or you may not be authorized. Try refreshing the page.');
+      } else {
+        setStatus(`Error: ${msg}`);
+      }
+    }
+  }
+
+  // ─── Secret Ballot: Commit Vote ───────────────────────────────────────────
+  async function commitSecretVote(pollId, optionId) {
+    setStatus(null);
+    try {
+      const signer = walletSigner || await getSigner();
+      const contract = getContract(signer);
+      const sbmContract = getSecretBallotManagerContract(signer);
+      const poll = polls.find(p => Number(p.id) === Number(pollId));
+      const voterAddress = await signer.getAddress();
+
+      // Generate a random salt
+      const salt = ethers.hexlify(ethers.randomBytes(32));
+      // commitHash = keccak256(abi.encodePacked(pollId, optionId, salt, voterAddress))
+      const commitHash = ethers.solidityPackedKeccak256(
+        ['uint256', 'uint256', 'bytes32', 'address'],
+        [pollId, optionId, salt, voterAddress]
+      );
+
+      setStatus('Committing vote (save your salt!)...');
+
+      // Thorough token detection (same as vote())
+      let isTokenEnabled = poll?.tokenConfig?.tokenRequired || poll?.tokenConfig?.enabled;
+      try {
+        const rawTokenConfig = await contract.getTokenConfig(pollId);
+        const tcEnabled = rawTokenConfig?.enabled ?? rawTokenConfig?.[0] ?? false;
+        const tcRequired = rawTokenConfig?.tokenRequired ?? rawTokenConfig?.[1] ?? false;
+        if (tcEnabled || tcRequired) isTokenEnabled = true;
+      } catch {}
+      try {
+        const rawPoll = await contract.polls(pollId);
+        const pEnabled = Boolean(rawPoll?.tokenVotingEnabled ?? rawPoll?.[9] ?? false);
+        const pRequired = Boolean(rawPoll?.tokenVotingRequired ?? rawPoll?.[10] ?? false);
+        if (pEnabled || pRequired) isTokenEnabled = true;
+      } catch {}
+
+      const tx = await sendTxWithNonceRetry({
+        signer,
+        sendTx: (overrides = {}) =>
+          isTokenEnabled
+            ? sbmContract.commitVoteWithToken(pollId, commitHash, overrides)
+            : sbmContract.commitVote(pollId, commitHash, overrides),
+        onRetry: () => setStatus('Retrying commit...')
+      });
+      await tx.wait();
+
+      // Store salt so voter can reveal later
+      setCommitSalt(prev => ({ ...prev, [pollId]: salt }));
+      setRevealOptionId(prev => ({ ...prev, [pollId]: optionId }));
+
+      setStatus(`✅ Vote committed for poll #${pollId}! SAVE YOUR SALT: ${salt}`);
+      await loadPolls(addr);
+    } catch (err) {
+      setStatus(`Error: ${getContractErrorDetails(err).description}`);
+    }
+  }
+
+  // ─── Secret Ballot: Reveal Vote ──────────────────────────────────────────
+  async function revealSecretVote(pollId) {
+    setStatus(null);
+    try {
+      const signer = walletSigner || await getSigner();
+      const sbmContract = getSecretBallotManagerContract(signer);
+
+      const salt = commitSalt[pollId];
+      const optionId = revealOptionId[pollId];
+      if (!salt || optionId == null) {
+        setStatus('Error: No saved salt/option for this poll. Enter them manually.');
+        return;
+      }
+
+      setStatus('Revealing vote...');
+      const tx = await sendTxWithNonceRetry({
+        signer,
+        sendTx: (overrides = {}) => sbmContract.revealVote(pollId, optionId, salt, overrides),
+        onRetry: () => setStatus('Retrying reveal...')
+      });
+      await tx.wait();
+
+      setStatus(`✅ Vote revealed for poll #${pollId}`);
+      setCommitSalt(prev => { const n = { ...prev }; delete n[pollId]; return n; });
+      setRevealOptionId(prev => { const n = { ...prev }; delete n[pollId]; return n; });
+      await loadPolls(addr);
+    } catch (err) {
+      setStatus(`Error: ${getContractErrorDetails(err).description}`);
+    }
+  }
+
+  // ─── Gasless Voting (EIP-712 Meta-Transaction) ────────────────────────────
+  async function voteGasless(pollId, optionId) {
+    setStatus(null);
+    try {
+      const signer = walletSigner || await getSigner();
+      const voterAddress = await signer.getAddress();
+
+      // Use per-poll paymaster if set, otherwise global default
+      const currentPoll = polls.find(p => Number(p.id) === Number(pollId));
+      let paymasterContract;
+      if (currentPoll?.pollPaymaster) {
+        paymasterContract = getVotingPaymasterAt(currentPoll.pollPaymaster, getEffectiveProvider());
+      } else {
+        paymasterContract = getVotingPaymasterContract(getEffectiveProvider());
+      }
+
+      // Step 1: Get nonce and build EIP-712 typed data
+      const nonce = await paymasterContract.getNonce(voterAddress);
+      const deadline = Math.floor(Date.now() / 1000) + 3600; // 1 hour from now
+      const chainId = Number(process.env.REACT_APP_CHAIN_ID || (await getEffectiveProvider().getNetwork()).chainId);
+      const paymasterAddress = await paymasterContract.getAddress();
+
+      const domain = {
+        name: 'VotingPaymaster',
+        version: '1',
+        chainId,
+        verifyingContract: paymasterAddress,
+      };
+
+      const types = {
+        VoteWithToken: [
+          { name: 'pollId', type: 'uint256' },
+          { name: 'optionId', type: 'uint256' },
+          { name: 'voter', type: 'address' },
+          { name: 'nonce', type: 'uint256' },
+          { name: 'deadline', type: 'uint256' },
+        ],
+      };
+
+      const value = {
+        pollId: BigInt(pollId),
+        optionId: BigInt(optionId),
+        voter: voterAddress,
+        nonce,
+        deadline: BigInt(deadline),
+      };
+
+      // Step 2: Voter signs EIP-712 typed data (no gas cost)
+      setStatus('Sign the gasless vote in your wallet (no gas cost)...');
+      const signature = await signer.signTypedData(domain, types, value);
+      const sig = ethers.Signature.from(signature);
+
+      // Step 3: Submit via relayer
+      // In local mode, use Account #0 (owner) as the relayer
+      // In production, this would be sent to a relayer API
+      setStatus('Submitting gasless vote via relayer...');
+      let relayerSigner;
+
+      if (mode === 'local') {
+        const provider = getEffectiveProvider();
+        const ownerKey = HARDHAT_ACCOUNTS[0]?.key;
+        if (ownerKey) {
+          relayerSigner = new ethers.Wallet(ownerKey, provider);
+        } else {
+          relayerSigner = await provider.getSigner(0);
+        }
+      } else {
+        // In production: self-relay (voter pays gas for the executeVoteWithToken call)
+        // In a real deployment, this would POST to a relayer backend
+        relayerSigner = signer;
+      }
+
+      let paymasterWithRelayer;
+      if (currentPoll?.pollPaymaster) {
+        paymasterWithRelayer = getVotingPaymasterAt(currentPoll.pollPaymaster, relayerSigner);
+      } else {
+        paymasterWithRelayer = getVotingPaymasterContract(relayerSigner);
+      }
+
+      const tx = await sendTxWithNonceRetry({
+        signer: relayerSigner,
+        sendTx: (overrides = {}) => paymasterWithRelayer.executeVoteWithToken(
+          pollId,
+          optionId,
+          voterAddress,
+          deadline,
+          sig.v,
+          sig.r,
+          sig.s,
+          overrides
+        ),
+        onRetry: () => setStatus('Retrying gasless vote relay...')
+      });
+
+      setStatus('Waiting for confirmation...');
+      await tx.wait();
+
+      setStatus('✅ Gasless vote submitted successfully!');
+      await loadPolls(addr);
+    } catch (err) {
+      const details = getContractErrorDetails(err);
       setStatus(`Error: ${details.description}`);
     }
+  }
+
+  // ─── Delegation ───────────────────────────────────────────────────────────
+  async function delegateVote(pollId) {
+    setStatus(null);
+    try {
+      if (!delegateAddress || !ethers.isAddress(delegateAddress)) {
+        setStatus('Error: Enter a valid delegate address');
+        return;
+      }
+      const signer = walletSigner || await getSigner();
+      const contract = getContract(signer);
+      setStatus('Delegating vote...');
+      const tx = await sendTxWithNonceRetry({
+        signer,
+        sendTx: (overrides = {}) => contract.delegateVote(pollId, delegateAddress, overrides),
+        onRetry: () => setStatus('Retrying delegation...')
+      });
+      await tx.wait();
+      setStatus(`✅ Vote delegated to ${delegateAddress} for poll #${pollId}`);
+      setDelegateAddress('');
+      await loadPolls(addr);
+    } catch (err) {
+      setStatus(`Error: ${getContractErrorDetails(err).description}`);
+    }
+  }
+
+  async function removeDelegation(pollId) {
+    setStatus(null);
+    try {
+      const signer = walletSigner || await getSigner();
+      const contract = getContract(signer);
+      setStatus('Removing delegation...');
+      const tx = await sendTxWithNonceRetry({
+        signer,
+        sendTx: (overrides = {}) => contract.removeDelegation(pollId, overrides),
+        onRetry: () => setStatus('Retrying remove delegation...')
+      });
+      await tx.wait();
+      setStatus(`✅ Delegation removed for poll #${pollId}`);
+      await loadPolls(addr);
+    } catch (err) {
+      setStatus(`Error: ${getContractErrorDetails(err).description}`);
+    }
+  }
+
+  async function voteAsDelegate(pollId, optionId, delegatorAddress) {
+    setStatus(null);
+    let contract;
+    try {
+      const signer = walletSigner || await getSigner();
+      contract = getContract(signer);
+      setStatus('Voting as delegate...');
+      const tx = await sendTxWithNonceRetry({
+        signer,
+        sendTx: (overrides = {}) => contract.voteAsDelegate(pollId, optionId, delegatorAddress, overrides),
+        onRetry: () => setStatus('Retrying delegate vote...')
+      });
+      await tx.wait();
+      setStatus(`✅ Delegate vote cast for poll #${pollId}`);
+      await loadPolls(addr);
+    } catch (err) {
+      setStatus(`Error: ${getContractErrorDetails(err, contract).description}`);
+    }
+  }
+
+  // ─── Quadratic Voting ─────────────────────────────────────────────────────
+  async function submitQuadraticVote(pollId) {
+    setStatus(null);
+    let contract;
+    try {
+      const signer = walletSigner || await getSigner();
+      contract = getContract(signer);
+      const allocations = quadraticAllocations[pollId] || {};
+      const optionIds = Object.keys(allocations).filter(k => allocations[k] > 0).map(Number);
+      const amounts = optionIds.map(id => Number(allocations[id]));
+
+      if (optionIds.length === 0) {
+        setStatus('Error: Allocate tokens to at least one option');
+        return;
+      }
+
+      setStatus('Submitting quadratic vote...');
+      const tx = await sendTxWithNonceRetry({
+        signer,
+        sendTx: (overrides = {}) => contract.voteQuadratic(pollId, optionIds, amounts, overrides),
+        onRetry: () => setStatus('Retrying quadratic vote...')
+      });
+      await tx.wait();
+      setStatus(`✅ Quadratic vote submitted for poll #${pollId}`);
+      setQuadraticAllocations(prev => { const n = { ...prev }; delete n[pollId]; return n; });
+      await loadPolls(addr);
+    } catch (err) {
+      setStatus(`Error: ${getContractErrorDetails(err, contract).description}`);
+    }
+  }
+
+  function updateQuadraticAllocation(pollId, optionId, amount) {
+    setQuadraticAllocations(prev => ({
+      ...prev,
+      [pollId]: { ...(prev[pollId] || {}), [optionId]: Math.max(0, Number(amount) || 0) }
+    }));
+  }
+
+  // ─── Multi-Choice Voting ──────────────────────────────────────────────────
+  async function submitMultiChoiceVote(pollId) {
+    setStatus(null);
+    let contract;
+    try {
+      const signer = walletSigner || await getSigner();
+      contract = getContract(signer);
+      const selections = multiChoiceSelections[pollId] || new Set();
+      const optionIds = [...selections];
+
+      if (optionIds.length === 0) {
+        setStatus('Error: Select at least one option');
+        return;
+      }
+
+      setStatus('Submitting multi-choice vote...');
+      const tx = await sendTxWithNonceRetry({
+        signer,
+        sendTx: (overrides = {}) => contract.voteMultiChoice(pollId, optionIds, overrides),
+        onRetry: () => setStatus('Retrying multi-choice vote...')
+      });
+      await tx.wait();
+      setStatus(`✅ Multi-choice vote submitted for poll #${pollId}`);
+      setMultiChoiceSelections(prev => { const n = { ...prev }; delete n[pollId]; return n; });
+      await loadPolls(addr);
+    } catch (err) {
+      setStatus(`Error: ${getContractErrorDetails(err, contract).description}`);
+    }
+  }
+
+  function toggleMultiChoice(pollId, optionId, maxAllowed) {
+    setMultiChoiceSelections(prev => {
+      const current = new Set(prev[pollId] || []);
+      if (current.has(optionId)) {
+        current.delete(optionId);
+      } else if (current.size < maxAllowed) {
+        current.add(optionId);
+      }
+      return { ...prev, [pollId]: current };
+    });
   }
 
   async function togglePollDetails(pollId) {
@@ -387,15 +839,18 @@ export default function VoteList({ mode = 'production' }) {
     if (addr) {
       setExpandedPoll(null);
       let pollInterval;
+      const refreshMs = Number(process.env.REACT_APP_REFRESH_INTERVAL);
 
       const startPolling = () => {
         if (document.visibilityState !== 'visible') return;
         loadPolls(addr);
-        pollInterval = setInterval(() => {
-          if (document.visibilityState === 'visible') {
-            loadPolls(addr);
-          }
-        }, 30000);
+        if (refreshMs > 0) {
+          pollInterval = setInterval(() => {
+            if (document.visibilityState === 'visible') {
+              loadPolls(addr);
+            }
+          }, refreshMs);
+        }
       };
 
       const stopPolling = () => {
@@ -412,12 +867,36 @@ export default function VoteList({ mode = 'production' }) {
 
       startPolling();
       document.addEventListener('visibilitychange', handleVisibility);
+
+      // Real-time event listeners — refresh immediately when key events fire
+      const provider = getEffectiveProvider();
+      const contract = getContract(provider);
+      const eventHandler = () => { loadPolls(addr); };
+      const eventNames = ['Voted', 'ResultsRevealed', 'PollCreated', 'VoterAuthorized'];
+      const listeners = [];
+      for (const eventName of eventNames) {
+        try {
+          contract.on(eventName, eventHandler);
+          listeners.push(eventName);
+        } catch { /* event may not exist in ABI */ }
+      }
+      console.log('📡 Listening for live events:', listeners.join(', '));
+
       return () => {
         stopPolling();
         document.removeEventListener('visibilitychange', handleVisibility);
+        for (const eventName of listeners) {
+          try { contract.off(eventName, eventHandler); } catch {}
+        }
       };
     }
   }, [addr]);
+
+  // Live countdown ticker — re-renders every second so time labels stay accurate
+  useEffect(() => {
+    const timer = setInterval(() => setTick(t => t + 1), 1000);
+    return () => clearInterval(timer);
+  }, []);
 
 
   const formatTimeRemaining = (endTime) => {
@@ -534,12 +1013,19 @@ export default function VoteList({ mode = 'production' }) {
 
       {polls.length === 0 ? (
         <div className="empty-state">
-          You are not authorized to vote in any polls yet.
-          <div className="muted">Contact the poll administrator to get authorized.</div>
+          You are not authorized to vote in any active polls.
+          <div className="muted">
+            Polls may exist but you need to be authorized as a voter by the poll admin.
+          </div>
           {mode === 'local' && (
             <div className="muted small">
-              For testing, go to <a href="/local/admin">/local/admin</a> with Account #0 to create a poll and
-              authorize this address.
+              <strong>Steps to see polls here:</strong>
+              <ol style={{ textAlign: 'left', margin: '8px auto', maxWidth: 420 }}>
+                <li>Go to <a href="/local/admin">/local/admin</a> and connect as Account #0 (Owner)</li>
+                <li>Create a poll</li>
+                <li>Add this address as an authorized voter in the "Authorize Voters" section</li>
+                <li>Come back here and reconnect</li>
+              </ol>
             </div>
           )}
           <div className="muted small">
@@ -552,10 +1038,25 @@ export default function VoteList({ mode = 'production' }) {
       ) : (
         <section className="panel-card panel-card--wide">
           <div className="panel-head">
-            <h3>Your Polls</h3>
+            <h3>Your Polls ({filteredVoterPolls.length} of {polls.length})</h3>
           </div>
+
+          <SearchBar
+            searchTerm={voterSearch}
+            onSearchChange={(v) => { setVoterSearch(v); setVoterPage(1); }}
+            placeholder="Search polls by title or ID…"
+            filters={[
+              { id: 'all',      label: 'All',      active: voterStatusFilter === 'all' },
+              { id: 'active',   label: 'Active',   active: voterStatusFilter === 'active' },
+              { id: 'ended',    label: 'Ended',    active: voterStatusFilter === 'ended' },
+              { id: 'revealed', label: 'Revealed', active: voterStatusFilter === 'revealed' },
+              { id: 'voted',    label: 'Voted',    active: voterStatusFilter === 'voted' },
+            ]}
+            onFilterToggle={(id) => { setVoterStatusFilter(id); setVoterPage(1); }}
+          />
+
           <div className="poll-grid">
-            {polls.map(poll => {
+            {voterPollsPage.map(poll => {
               const nowTs = Math.floor(Date.now() / 1000);
               const status = poll.status || { started: true, active: false, ended: poll.ended, revealed: poll.revealed };
               const hasStartedByTime = poll.startTime ? nowTs >= poll.startTime : true;
@@ -610,7 +1111,14 @@ export default function VoteList({ mode = 'production' }) {
                         </div>
                       )}
                       {poll.tokenConfig?.allowGaslessVoting && (
-                        <div className="muted small">⛽ Gasless mode enabled (owner paymaster required)</div>
+                        <div className="muted small">⛽ Gasless voting available (zero gas cost)</div>
+                      )}
+                      {poll.metadataURI && (
+                        <div className="muted small" style={{ wordBreak: 'break-all' }}>
+                          📎 Metadata: {poll.metadataURI.startsWith('http') ? (
+                            <a href={poll.metadataURI} target="_blank" rel="noopener noreferrer">{poll.metadataURI}</a>
+                          ) : poll.metadataURI}
+                        </div>
                       )}
                     </div>
                     {poll.hasVoted && <span className="chip chip-success">Voted</span>}
@@ -635,6 +1143,41 @@ export default function VoteList({ mode = 'production' }) {
                         <strong>{poll.totalVotes}</strong>
                       </div>
                     )}
+                    {poll.isSecretBallot && (
+                      <div><span>Mode</span><strong><span className="chip">Secret Ballot</span></strong></div>
+                    )}
+                    {poll.quadraticEnabled && (
+                      <div><span>Mode</span><strong><span className="chip">Quadratic</span></strong></div>
+                    )}
+                    {poll.maxChoices > 0 && (
+                      <div><span>Multi-choice</span><strong>Up to {poll.maxChoices}</strong></div>
+                    )}
+                    {poll.delegation?.isDelegated && (
+                      <div><span>Delegated to</span><strong className="muted small">{poll.delegation.delegatee}</strong></div>
+                    )}
+                    {poll.delegation?.delegationsReceived > 0 && (
+                      <div><span>Delegations received</span><strong>{poll.delegation.delegationsReceived}</strong></div>
+                    )}
+                    {poll.isSecretBallot && poll.sbStatus && (() => {
+                      // Compute phase locally from timestamps for accuracy
+                      // Contract's isPollActive uses block.timestamp which may lag
+                      const sbCommit = poll.sbStatus.inCommitPhase || isActiveEffective;
+                      const sbReveal = poll.sbStatus.inRevealPhase ||
+                        (isEndedEffective && poll.revealDeadline && nowTs < poll.revealDeadline && nowTs >= (poll.endTime + 30));
+                      const phase = sbCommit ? 'Commit' : sbReveal ? 'Reveal' : isUpcoming ? 'Not Started' : 'Closed';
+                      const phaseClass = sbCommit ? '' : sbReveal ? 'chip-warning' : isUpcoming ? '' : 'chip-success';
+                      return (
+                        <>
+                          <div>
+                            <span>Phase</span>
+                            <strong>
+                              <span className={`chip ${phaseClass}`}>{phase}</span>
+                            </strong>
+                          </div>
+                          <div><span>Commits / Reveals</span><strong>{poll.sbStatus.commits} / {poll.sbStatus.reveals}</strong></div>
+                        </>
+                      );
+                    })()}
                   </div>
 
                   <div className="poll-actions">
@@ -660,21 +1203,189 @@ export default function VoteList({ mode = 'production' }) {
                         </div>
                       )}
 
-                      {poll.options.map(option => (
-                        <div key={option.id} className="option-row">
-                          <div>
-                            <strong>{option.name}</strong>
-                            {poll.revealed && (
-                              <div className="muted small">Votes: {option.votes}</div>
+                      {/* ─── Secret Ballot: Commit Phase ─────────────── */}
+                      {poll.isSecretBallot && (poll.sbStatus?.inCommitPhase || isActiveEffective) && !poll.hasCommitted && !poll.hasVoted && isActiveEffective && (
+                        <>
+                          <div className="info-banner">
+                            🔒 Secret Ballot — Choose a candidate to commit your hidden vote. You will reveal it later.
+                          </div>
+                          {poll.options.map(option => (
+                            <div key={option.id} className="option-row">
+                              <div><strong>{option.name}</strong></div>
+                              <button className="btn" onClick={() => commitSecretVote(poll.id, option.id)}>
+                                Commit Vote
+                              </button>
+                            </div>
+                          ))}
+                        </>
+                      )}
+
+                      {/* ─── Secret Ballot: Committed, awaiting reveal ── */}
+                      {poll.isSecretBallot && poll.hasCommitted && !poll.hasRevealed && (() => {
+                        const revealOpen = poll.sbStatus?.inRevealPhase ||
+                          (isEndedEffective && poll.revealDeadline && nowTs < poll.revealDeadline && nowTs >= (poll.endTime + 30));
+                        const stillCommit = poll.sbStatus?.inCommitPhase || isActiveEffective;
+                        return (
+                          <div className="info-banner">
+                            ✅ You have committed your vote.
+                            {revealOpen && (
+                              <>
+                                {' '}Reveal phase is open{poll.revealDeadline ? ` until ${formatDateTime(poll.revealDeadline)}` : ''}.
+                                {commitSalt[poll.id] ? (
+                                  <div style={{ marginTop: 8 }}>
+                                    <button className="btn" onClick={() => revealSecretVote(poll.id)}>
+                                      Reveal Vote Now
+                                    </button>
+                                    <div className="muted small" style={{ marginTop: 4 }}>
+                                      Saved salt: {commitSalt[poll.id]} | Option: {revealOptionId[poll.id]}
+                                    </div>
+                                  </div>
+                                ) : (
+                                  <div className="muted small" style={{ marginTop: 4 }}>
+                                    Salt not found in session. If you committed from another session, you need to reveal manually.
+                                  </div>
+                                )}
+                              </>
+                            )}
+                            {stillCommit && !revealOpen && (
+                              <> Reveal phase has not started yet.</>
                             )}
                           </div>
-                          {!isUpcoming && !poll.hasVoted && isActiveEffective && (
-                            <button className="btn" onClick={() => vote(poll.id, option.id)}>
-                              {poll.tokenConfig?.tokenRequired ? 'Vote with Token' : 'Vote'}
+                        );
+                      })()}
+
+                      {poll.isSecretBallot && poll.hasRevealed && (
+                        <div className="info-banner">✅ You have revealed your vote.</div>
+                      )}
+
+                      {/* ─── Quadratic Voting ────────────────────────── */}
+                      {poll.quadraticEnabled && !poll.hasVoted && isActiveEffective && !poll.isSecretBallot && (
+                        <>
+                          <div className="info-banner">
+                            📊 Quadratic Voting — Allocate tokens to candidates. Cost = votes². Tokens: {poll.voterTokenBalance}
+                          </div>
+                          {poll.options.map(option => (
+                            <div key={option.id} className="option-row">
+                              <div>
+                                <strong>{option.name}</strong>
+                                {poll.revealed && <div className="muted small">Votes: {option.votes}</div>}
+                              </div>
+                              <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                                <input
+                                  type="number" min="0" style={{ width: 70 }}
+                                  value={quadraticAllocations[poll.id]?.[option.id] || ''}
+                                  onChange={e => updateQuadraticAllocation(poll.id, option.id, e.target.value)}
+                                  className="form-input"
+                                  placeholder="0"
+                                />
+                                <span className="muted small">
+                                  cost: {Math.pow(Number(quadraticAllocations[poll.id]?.[option.id] || 0), 2)}
+                                </span>
+                              </div>
+                            </div>
+                          ))}
+                          {(() => {
+                            const allocs = quadraticAllocations[poll.id] || {};
+                            const totalCost = Object.values(allocs).reduce((s, v) => s + (Number(v) || 0) ** 2, 0);
+                            return (
+                              <div style={{ marginTop: 8, display: 'flex', alignItems: 'center', gap: 12 }}>
+                                <span className="muted small">Total cost: {totalCost} / {poll.voterTokenBalance} tokens</span>
+                                <button className="btn" onClick={() => submitQuadraticVote(poll.id)}
+                                  disabled={totalCost === 0 || totalCost > poll.voterTokenBalance}>
+                                  Submit Quadratic Vote
+                                </button>
+                              </div>
+                            );
+                          })()}
+                        </>
+                      )}
+
+                      {/* ─── Multi-Choice Voting ─────────────────────── */}
+                      {poll.maxChoices > 0 && !poll.quadraticEnabled && !poll.isSecretBallot && !poll.hasVoted && isActiveEffective && (
+                        <>
+                          <div className="info-banner">
+                            ☑️ Multi-Choice — Select up to {poll.maxChoices} candidates.
+                          </div>
+                          {poll.options.map(option => {
+                            const selected = multiChoiceSelections[poll.id]?.has(option.id);
+                            return (
+                              <div key={option.id} className="option-row">
+                                <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                                  <input
+                                    type="checkbox" checked={!!selected}
+                                    onChange={() => toggleMultiChoice(poll.id, option.id, poll.maxChoices)}
+                                  />
+                                  <strong>{option.name}</strong>
+                                  {poll.revealed && <span className="muted small"> ({option.votes} votes)</span>}
+                                </div>
+                              </div>
+                            );
+                          })}
+                          <div style={{ marginTop: 8 }}>
+                            <span className="muted small">
+                              Selected: {(multiChoiceSelections[poll.id]?.size || 0)} / {poll.maxChoices}
+                            </span>
+                            <button className="btn" style={{ marginLeft: 12 }}
+                              onClick={() => submitMultiChoiceVote(poll.id)}
+                              disabled={!multiChoiceSelections[poll.id]?.size}>
+                              Submit Multi-Choice Vote
                             </button>
+                          </div>
+                        </>
+                      )}
+
+                      {/* ─── Standard Voting (default) ───────────────── */}
+                      {!poll.isSecretBallot && !poll.quadraticEnabled && !(poll.maxChoices > 0) && (
+                        <>
+                          {poll.options.map(option => (
+                            <div key={option.id} className="option-row">
+                              <div>
+                                <strong>{option.name}</strong>
+                                {poll.revealed && (
+                                  <div className="muted small">Votes: {option.votes}</div>
+                                )}
+                              </div>
+                              {!isUpcoming && !poll.hasVoted && isActiveEffective && (
+                                <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+                                  <button className="btn" onClick={() => vote(poll.id, option.id)}>
+                                    {poll.tokenConfig?.tokenRequired ? 'Vote with Token' : 'Vote'}
+                                  </button>
+                                  {poll.tokenConfig?.allowGaslessVoting && poll.tokenConfig?.enabled && (
+                                    <button className="btn secondary" onClick={() => voteGasless(poll.id, option.id)}>
+                                      ⛽ Vote Gasless
+                                    </button>
+                                  )}
+                                </div>
+                              )}
+                            </div>
+                          ))}
+                        </>
+                      )}
+
+                      {/* ─── Delegation Controls ─────────────────────── */}
+                      {isActiveEffective && !poll.hasVoted && !poll.isSecretBallot && (
+                        <div style={{ marginTop: 12, borderTop: '1px solid rgba(0,0,0,0.08)', paddingTop: 12 }}>
+                          {poll.delegation?.isDelegated ? (
+                            <div>
+                              <span className="muted small">Your vote is delegated to {poll.delegation.delegatee}</span>
+                              <button className="btn ghost" style={{ marginLeft: 8 }} onClick={() => removeDelegation(poll.id)}>
+                                Remove Delegation
+                              </button>
+                            </div>
+                          ) : (
+                            <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+                              <input
+                                type="text" placeholder="Delegate address" style={{ flex: 1, minWidth: 200 }}
+                                value={delegateAddress} onChange={e => setDelegateAddress(e.target.value)}
+                                className="form-input"
+                              />
+                              <button className="btn ghost" onClick={() => delegateVote(poll.id)}>
+                                Delegate Vote
+                              </button>
+                            </div>
                           )}
                         </div>
-                      ))}
+                      )}
 
                       {isUpcoming && (
                         <div className="info-banner">
@@ -693,6 +1404,14 @@ export default function VoteList({ mode = 'production' }) {
               );
             })}
           </div>
+
+          <Pagination
+            totalItems={filteredVoterPolls.length}
+            page={voterPage}
+            pageSize={voterPageSize}
+            onPageChange={setVoterPage}
+            onPageSizeChange={(s) => { setVoterPageSize(s); setVoterPage(1); }}
+          />
         </section>
       )}
     </div>

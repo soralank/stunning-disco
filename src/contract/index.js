@@ -2,10 +2,14 @@ import { ethers } from 'ethers';
 import localABI from './abi.json';
 import tokenManagerLocalABI from './tokenManager.abi.json';
 import votingPaymasterLocalABI from './votingPaymaster.abi.json';
+import secretBallotManagerLocalABI from './secretBallotManager.abi.json';
+import franchiseeManagerLocalABI from './franchiseeManager.json';
 
 let ABI;
 let TOKEN_MANAGER_ABI = tokenManagerLocalABI;
 let VOTING_PAYMASTER_ABI = votingPaymasterLocalABI;
+let SECRET_BALLOT_MANAGER_ABI = secretBallotManagerLocalABI;
+let FRANCHISE_MANAGER_ABI = franchiseeManagerLocalABI;
 
 function resolveElectionsAbi(source) {
 	if (Array.isArray(source)) {
@@ -43,11 +47,21 @@ try {
 	console.warn('Using local ABI file; failed to parse ABI from env:', e?.message || e);
 }
 
+// Cache providers to avoid creating duplicate instances (which causes nonce tracking issues)
+let _browserProvider = null;
+let _jsonRpcProvider = null;
+
 export function getProvider() {
 	if (typeof window !== 'undefined' && window.ethereum) {
-		return new ethers.BrowserProvider(window.ethereum);
+		if (!_browserProvider) {
+			_browserProvider = new ethers.BrowserProvider(window.ethereum);
+		}
+		return _browserProvider;
 	}
-	return new ethers.JsonRpcProvider(process.env.REACT_APP_HARDHAT_RPC || 'http://localhost:8545');
+	if (!_jsonRpcProvider) {
+		_jsonRpcProvider = new ethers.JsonRpcProvider(process.env.REACT_APP_HARDHAT_RPC || 'http://localhost:8545');
+	}
+	return _jsonRpcProvider;
 }
 
 function getEnvValue(...keys) {
@@ -89,6 +103,27 @@ export function getVotingPaymasterContract(signerOrProvider) {
 	return new ethers.Contract(address, VOTING_PAYMASTER_ABI, signerOrProvider || getProvider());
 }
 
+/**
+ * Create a VotingPaymaster contract instance at a specific address.
+ * Used when a poll has a custom paymaster (per-franchise paymaster).
+ */
+export function getVotingPaymasterAt(address, signerOrProvider) {
+	if (!address) throw new Error('Paymaster address required');
+	return new ethers.Contract(address, VOTING_PAYMASTER_ABI, signerOrProvider || getProvider());
+}
+
+export function getSecretBallotManagerContract(signerOrProvider) {
+	const address = getEnvValue('REACT_APP_SECRET_BALLOT_MANAGER_ADDRESS', 'NEXT_PUBLIC_SECRET_BALLOT_MANAGER_ADDRESS');
+	if (!address) throw new Error('REACT_APP_SECRET_BALLOT_MANAGER_ADDRESS not set');
+	return new ethers.Contract(address, SECRET_BALLOT_MANAGER_ABI, signerOrProvider || getProvider());
+}
+
+export function getFranchiseManagerContract(signerOrProvider) {
+	const address = getEnvValue('REACT_APP_FRANCHISE_MANAGER_ADDRESS', 'NEXT_PUBLIC_FRANCHISE_MANAGER_ADDRESS');
+	if (!address) throw new Error('REACT_APP_FRANCHISE_MANAGER_ADDRESS not set');
+	return new ethers.Contract(address, FRANCHISE_MANAGER_ABI, signerOrProvider || getProvider());
+}
+
 function isStaleNonceError(err) {
 	const message = (err?.shortMessage || err?.message || String(err || '')).toLowerCase();
 	return (
@@ -98,24 +133,52 @@ function isStaleNonceError(err) {
 	);
 }
 
-async function getPendingNonce(signer) {
+async function getFreshNonce(signer) {
 	const signerAddress = await signer.getAddress();
 	const provider = signer.provider || getProvider();
-	return provider.getTransactionCount(signerAddress, 'pending');
+	// Use 'latest' (confirmed count) which is more reliable on Hardhat than 'pending'
+	const latestNonce = await provider.getTransactionCount(signerAddress, 'latest');
+	let pendingNonce;
+	try {
+		pendingNonce = await provider.getTransactionCount(signerAddress, 'pending');
+	} catch {
+		pendingNonce = latestNonce;
+	}
+	// Use the higher of the two to avoid reusing a nonce
+	return Math.max(latestNonce, pendingNonce);
 }
 
+const MAX_NONCE_RETRIES = 3;
+
 export async function sendTxWithNonceRetry({ signer, sendTx, onRetry }) {
+	let lastErr;
+	// First attempt: let ethers pick the nonce automatically
 	try {
 		return await sendTx();
 	} catch (err) {
 		if (!isStaleNonceError(err)) {
 			throw err;
 		}
-
-		onRetry?.();
-		const freshNonce = await getPendingNonce(signer);
-		return sendTx({ nonce: freshNonce });
+		lastErr = err;
 	}
+
+	// Subsequent retries: manually fetch and increment nonce
+	for (let attempt = 1; attempt <= MAX_NONCE_RETRIES; attempt++) {
+		onRetry?.();
+		try {
+			const freshNonce = await getFreshNonce(signer);
+			// On later retries, bump nonce in case there are untracked pending txs
+			const nonce = freshNonce + (attempt - 1);
+			return await sendTx({ nonce });
+		} catch (err) {
+			if (!isStaleNonceError(err)) {
+				throw err;
+			}
+			lastErr = err;
+		}
+	}
+
+	throw lastErr;
 }
 
 const ERROR_MESSAGE_MAP = {

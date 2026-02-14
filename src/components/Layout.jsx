@@ -9,7 +9,7 @@ export default function Layout({ children }) {
     <div className="app-root">
       <header className="site-header">
         <div className="brand">
-          Election Voting System
+          BLockchain Voting System
           {isLocal && <span style={{
             marginLeft: 10,
             padding: '2px 8px',
@@ -23,6 +23,7 @@ export default function Layout({ children }) {
           {isLocal ? (
             <>
               <Link className={loc.pathname === '/local/admin' ? 'active' : ''} to="/local/admin">Admin</Link>
+              <Link className={loc.pathname === '/local/franchisee' ? 'active' : ''} to="/local/franchisee">Franchisee</Link>
               <Link className={loc.pathname === '/local/voter' ? 'active' : ''} to="/local/voter">Voter</Link>
               <Link className={loc.pathname === '/local/results' ? 'active' : ''} to="/local/results">Results</Link>
               <Link to="/voter" style={{ marginLeft: 20, color: '#999' }}>→ Production Mode</Link>
@@ -30,6 +31,7 @@ export default function Layout({ children }) {
           ) : (
             <>
               <Link className={loc.pathname === '/admin' ? 'active' : ''} to="/admin">Admin</Link>
+              <Link className={loc.pathname === '/franchisee' ? 'active' : ''} to="/franchisee">Franchisee</Link>
               <Link className={loc.pathname === '/voter' ? 'active' : ''} to="/voter">Voter</Link>
               <Link className={loc.pathname === '/results' ? 'active' : ''} to="/results">Results</Link>
               <Link to="/local/voter" style={{ marginLeft: 20, color: '#999' }}>→ Local Testing</Link>

@@ -1,0 +1,109 @@
+# =============================================================================
+# CI/CD Pipeline — Build, Test, Dockerize, Deploy
+#
+# Environments:
+#   - test/qa  → push to 'develop' branch  → deploys Sepolia build
+#   - prod     → push to 'main' branch     → deploys Mainnet build
+#
+# Secrets you need to set in GitHub → Settings → Secrets:
+#   DOCKER_USERNAME          — Docker Hub / GHCR username
+#   DOCKER_PASSWORD          — Docker Hub / GHCR token
+#   REACT_APP_CONTRACT_ADDRESS_TEST
+#   REACT_APP_TOKEN_MANAGER_ADDRESS_TEST
+#   REACT_APP_VOTING_PAYMASTER_ADDRESS_TEST
+#   REACT_APP_CONTRACT_ADDRESS_PROD
+#   REACT_APP_TOKEN_MANAGER_ADDRESS_PROD
+#   REACT_APP_VOTING_PAYMASTER_ADDRESS_PROD
+# =============================================================================
+
+name: CI/CD
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main, develop]
+
+env:
+  IMAGE_NAME: ghcr.io/${{ github.repository }}
+
+jobs:
+  # -------------------------------------------------------------------
+  # 1. Lint & Test
+  # -------------------------------------------------------------------
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 18
+          cache: npm
+
+      - run: npm ci
+      - run: CI=true npm test -- --watchAll=false
+
+  # -------------------------------------------------------------------
+  # 2. Build Docker image & push to GitHub Container Registry
+  # -------------------------------------------------------------------
+  build-and-push:
+    name: Build & Push (${{ matrix.env }})
+    needs: test
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      matrix:
+        include:
+          - env: test
+            branch: develop
+            chain_id: "11155111"
+            refresh: "15000"
+          - env: prod
+            branch: main
+            chain_id: "1"
+            refresh: "30000"
+    steps:
+      - uses: actions/checkout@v4
+        if: github.ref == format('refs/heads/{0}', matrix.branch)
+
+      - name: Log in to GHCR
+        if: github.ref == format('refs/heads/{0}', matrix.branch)
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set contract addresses
+        if: github.ref == format('refs/heads/{0}', matrix.branch)
+        run: |
+          if [ "${{ matrix.env }}" = "test" ]; then
+            echo "CONTRACT=${{ secrets.REACT_APP_CONTRACT_ADDRESS_TEST }}" >> $GITHUB_ENV
+            echo "TOKEN_MGR=${{ secrets.REACT_APP_TOKEN_MANAGER_ADDRESS_TEST }}" >> $GITHUB_ENV
+            echo "PAYMASTER=${{ secrets.REACT_APP_VOTING_PAYMASTER_ADDRESS_TEST }}" >> $GITHUB_ENV
+          else
+            echo "CONTRACT=${{ secrets.REACT_APP_CONTRACT_ADDRESS_PROD }}" >> $GITHUB_ENV
+            echo "TOKEN_MGR=${{ secrets.REACT_APP_TOKEN_MANAGER_ADDRESS_PROD }}" >> $GITHUB_ENV
+            echo "PAYMASTER=${{ secrets.REACT_APP_VOTING_PAYMASTER_ADDRESS_PROD }}" >> $GITHUB_ENV
+          fi
+
+      - name: Build & push Docker image
+        if: github.ref == format('refs/heads/{0}', matrix.branch)
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: true
+          tags: |
+            ${{ env.IMAGE_NAME }}:${{ matrix.env }}
+            ${{ env.IMAGE_NAME }}:${{ matrix.env }}-${{ github.sha }}
+          build-args: |
+            REACT_APP_CONTRACT_ADDRESS=${{ env.CONTRACT }}
+            REACT_APP_TOKEN_MANAGER_ADDRESS=${{ env.TOKEN_MGR }}
+            REACT_APP_VOTING_PAYMASTER_ADDRESS=${{ env.PAYMASTER }}
+            REACT_APP_CHAIN_ID=${{ matrix.chain_id }}
+            REACT_APP_REFRESH_INTERVAL=${{ matrix.refresh }}
