@@ -1,15 +1,18 @@
 import { ethers } from 'ethers';
-import localABI from './abi.json';
+import localABI from './electionManager.abi.json';
 import tokenManagerLocalABI from './tokenManager.abi.json';
 import votingPaymasterLocalABI from './votingPaymaster.abi.json';
 import secretBallotManagerLocalABI from './secretBallotManager.abi.json';
-import franchiseeManagerLocalABI from './franchiseeManager.json';
+import franchiseeManagerLocalABI from './franchiseeManager.abi.json';
+import votingReaderLocalABI from './votingReader.abi.json';
+import { devWarn } from '../utils/logger';
 
 let ABI;
 let TOKEN_MANAGER_ABI = tokenManagerLocalABI;
 let VOTING_PAYMASTER_ABI = votingPaymasterLocalABI;
 let SECRET_BALLOT_MANAGER_ABI = secretBallotManagerLocalABI;
 let FRANCHISE_MANAGER_ABI = franchiseeManagerLocalABI;
+let VOTING_READER_ABI = votingReaderLocalABI;
 
 function resolveElectionsAbi(source) {
 	if (Array.isArray(source)) {
@@ -44,7 +47,7 @@ try {
 } catch (e) {
 	// use local ABI file as fallback
 	ABI = resolveElectionsAbi(localABI);
-	console.warn('Using local ABI file; failed to parse ABI from env:', e?.message || e);
+	devWarn('Using local ABI file; failed to parse ABI from env:', e?.message || e);
 }
 
 // Cache providers to avoid creating duplicate instances (which causes nonce tracking issues)
@@ -58,8 +61,14 @@ export function getProvider() {
 		}
 		return _browserProvider;
 	}
+	// In production, a browser wallet (MetaMask) is required.
+	// Only fall back to JSON-RPC in development / local mode.
+	const rpcUrl = process.env.REACT_APP_HARDHAT_RPC;
+	if (!rpcUrl && process.env.NODE_ENV === 'production') {
+		throw new Error('No wallet detected. Please install MetaMask or another Web3 wallet to use this application.');
+	}
 	if (!_jsonRpcProvider) {
-		_jsonRpcProvider = new ethers.JsonRpcProvider(process.env.REACT_APP_HARDHAT_RPC || 'http://localhost:8545');
+		_jsonRpcProvider = new ethers.JsonRpcProvider(rpcUrl || 'http://localhost:8545');
 	}
 	return _jsonRpcProvider;
 }
@@ -122,6 +131,12 @@ export function getFranchiseManagerContract(signerOrProvider) {
 	const address = getEnvValue('REACT_APP_FRANCHISE_MANAGER_ADDRESS', 'NEXT_PUBLIC_FRANCHISE_MANAGER_ADDRESS');
 	if (!address) throw new Error('REACT_APP_FRANCHISE_MANAGER_ADDRESS not set');
 	return new ethers.Contract(address, FRANCHISE_MANAGER_ABI, signerOrProvider || getProvider());
+}
+
+export function getVotingReaderContract(signerOrProvider) {
+	const address = getEnvValue('REACT_APP_VOTING_READER_ADDRESS', 'NEXT_PUBLIC_VOTING_READER_ADDRESS');
+	if (!address) throw new Error('REACT_APP_VOTING_READER_ADDRESS not set');
+	return new ethers.Contract(address, VOTING_READER_ABI, signerOrProvider || getProvider());
 }
 
 function isStaleNonceError(err) {
@@ -292,4 +307,30 @@ export function getContractErrorDetails(err, contract) {
 		description: mappedDescription || description || fallbackMessage,
 		rawMessage: fallbackMessage,
 	};
+}
+
+/**
+ * Verify the connected wallet is on the expected chain.
+ * Returns null if OK, or a warning string if chain mismatch detected.
+ */
+export async function verifyChainId(providerOrSigner) {
+	const expectedChainId = process.env.REACT_APP_CHAIN_ID;
+	if (!expectedChainId) {
+		if (process.env.NODE_ENV === 'production') {
+			return 'REACT_APP_CHAIN_ID is not configured — cannot verify network safety. Please contact the site administrator.';
+		}
+		return null; // dev mode: skip if not configured
+	}
+	try {
+		const provider = providerOrSigner?.provider || providerOrSigner || getProvider();
+		const network = await provider.getNetwork();
+		const actual = Number(network.chainId);
+		const expected = Number(expectedChainId);
+		if (actual !== expected) {
+			return `Wrong network: connected to chain ${actual} (${network.name || 'unknown'}) but expected chain ${expected}. Please switch networks in your wallet.`;
+		}
+	} catch (err) {
+		return `Unable to verify network: ${err.message || 'unknown error'}. Please check your wallet connection.`;
+	}
+	return null;
 }

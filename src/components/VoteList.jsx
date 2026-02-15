@@ -37,9 +37,28 @@ export default function VoteList({ mode = 'production' }) {
   // Delegation state
   const [delegateAddress, setDelegateAddress] = useState('');
 
-  // Secret ballot state
-  const [commitSalt, setCommitSalt] = useState({});   // { pollId: saltHex }
-  const [revealOptionId, setRevealOptionId] = useState({});
+  // Secret ballot state — persisted to localStorage so salts survive page refreshes
+  const [commitSalt, setCommitSaltRaw] = useState(() => {
+    try { return JSON.parse(localStorage.getItem('__sb_salts') || '{}'); } catch { return {}; }
+  });
+  const [revealOptionId, setRevealOptionIdRaw] = useState(() => {
+    try { return JSON.parse(localStorage.getItem('__sb_options') || '{}'); } catch { return {}; }
+  });
+  // Wrapper setters that sync to localStorage
+  const setCommitSalt = (updater) => {
+    setCommitSaltRaw(prev => {
+      const next = typeof updater === 'function' ? updater(prev) : updater;
+      try { localStorage.setItem('__sb_salts', JSON.stringify(next)); } catch {}
+      return next;
+    });
+  };
+  const setRevealOptionId = (updater) => {
+    setRevealOptionIdRaw(prev => {
+      const next = typeof updater === 'function' ? updater(prev) : updater;
+      try { localStorage.setItem('__sb_options', JSON.stringify(next)); } catch {}
+      return next;
+    });
+  };
 
   // Quadratic voting state
   const [quadraticAllocations, setQuadraticAllocations] = useState({}); // { pollId: { optionId: amount } }
@@ -308,6 +327,37 @@ export default function VoteList({ mode = 'production' }) {
                 inRevealPhase: sbStatus.inRevealPhase ?? sbStatus[4]
               };
               try { lastPoll.revealDeadline = Number(await sbmContract.getRevealDeadline(i)); } catch { lastPoll.revealDeadline = 0; }
+
+              // ── Auto-reveal: if reveal phase is open and we have the salt, reveal automatically ──
+              const nowAuto = Math.floor(Date.now() / 1000);
+              const revealPhaseOpen = lastPoll.sbStatus.inRevealPhase ||
+                (status.ended && lastPoll.revealDeadline && nowAuto < lastPoll.revealDeadline && nowAuto >= (endTime + 30));
+              if (lastPoll.hasCommitted && !lastPoll.hasRevealed && revealPhaseOpen) {
+                const saltKey = `${i}_${voterAddress}`;
+                const salt = commitSalt[saltKey] || commitSalt[i];
+                const optId = revealOptionId[saltKey] ?? revealOptionId[i];
+                if (salt && optId != null) {
+                  try {
+                    console.log(`Auto-revealing vote for poll #${i}...`);
+                    const autoSigner = walletSigner || await getSigner();
+                    const sbmSigner = getSecretBallotManagerContract(autoSigner);
+                    const revealTx = await sendTxWithNonceRetry({
+                      signer: autoSigner,
+                      sendTx: (overrides = {}) => sbmSigner.revealVote(i, optId, salt, overrides),
+                      onRetry: () => console.log(`Retrying auto-reveal for poll #${i}...`)
+                    });
+                    await revealTx.wait();
+                    console.log(`Auto-revealed vote for poll #${i} successfully`);
+                    lastPoll.hasRevealed = true;
+                    lastPoll.sbStatus.reveals += 1;
+                    // Clean up saved salt
+                    setCommitSalt(prev => { const n = { ...prev }; delete n[saltKey]; delete n[i]; return n; });
+                    setRevealOptionId(prev => { const n = { ...prev }; delete n[saltKey]; delete n[i]; return n; });
+                  } catch (autoErr) {
+                    console.warn(`Auto-reveal failed for poll #${i}:`, autoErr.message);
+                  }
+                }
+              }
             } catch (sbErr) {
               console.warn('SBM status error for poll', i, sbErr.message);
               lastPoll.hasCommitted = false;
@@ -521,11 +571,16 @@ export default function VoteList({ mode = 'production' }) {
         signer,
         sendTx: (overrides = {}) =>
           isTokenEnabled
-            ? sbmContract.commitVoteWithToken(pollId, optionId, salt, commitHash, overrides)
-            : sbmContract.commitVote(pollId, optionId, salt, commitHash, overrides),
+            ? sbmContract.commitVoteWithToken(pollId, commitHash, overrides)
+            : sbmContract.commitVote(pollId, commitHash, overrides),
         onRetry: () => setStatus('Retrying commit...')
       });
       await tx.wait();
+
+      // Persist salt and optionId so reveal can happen later (keyed by pollId+address)
+      const saltKey = `${pollId}_${voterAddress}`;
+      setCommitSalt(prev => ({ ...prev, [saltKey]: salt }));
+      setRevealOptionId(prev => ({ ...prev, [saltKey]: optionId }));
 
       setStatus(`✅ Vote recorded for poll #${pollId}! Results hidden until admin reveals.`);
       await loadPolls(addr);
@@ -540,9 +595,12 @@ export default function VoteList({ mode = 'production' }) {
     try {
       const signer = walletSigner || await getSigner();
       const sbmContract = getSecretBallotManagerContract(signer);
+      const voterAddress = await signer.getAddress();
+      const saltKey = `${pollId}_${voterAddress}`;
 
-      const salt = commitSalt[pollId];
-      const optionId = revealOptionId[pollId];
+      // Check new key format first, fallback to legacy pollId-only key
+      const salt = commitSalt[saltKey] || commitSalt[pollId];
+      const optionId = revealOptionId[saltKey] ?? revealOptionId[pollId];
       if (!salt || optionId == null) {
         setStatus('Error: No saved salt/option for this poll. Enter them manually.');
         return;
@@ -557,8 +615,8 @@ export default function VoteList({ mode = 'production' }) {
       await tx.wait();
 
       setStatus(`✅ Vote revealed for poll #${pollId}`);
-      setCommitSalt(prev => { const n = { ...prev }; delete n[pollId]; return n; });
-      setRevealOptionId(prev => { const n = { ...prev }; delete n[pollId]; return n; });
+      setCommitSalt(prev => { const n = { ...prev }; delete n[saltKey]; delete n[pollId]; return n; });
+      setRevealOptionId(prev => { const n = { ...prev }; delete n[saltKey]; delete n[pollId]; return n; });
       await loadPolls(addr);
     } catch (err) {
       setStatus(`Error: ${getContractErrorDetails(err).description}`);
@@ -1229,13 +1287,13 @@ export default function VoteList({ mode = 'production' }) {
                             {revealOpen && (
                               <>
                                 {' '}Reveal phase is open{poll.revealDeadline ? ` until ${formatDateTime(poll.revealDeadline)}` : ''}.
-                                {commitSalt[poll.id] ? (
+                                {(commitSalt[`${poll.id}_${addr}`] || commitSalt[poll.id]) ? (
                                   <div style={{ marginTop: 8 }}>
                                     <button className="btn" onClick={() => revealSecretVote(poll.id)}>
                                       Reveal Vote Now
                                     </button>
                                     <div className="muted small" style={{ marginTop: 4 }}>
-                                      Saved salt: {commitSalt[poll.id]} | Option: {revealOptionId[poll.id]}
+                                      Saved salt: {commitSalt[`${poll.id}_${addr}`] || commitSalt[poll.id]} | Option: {revealOptionId[`${poll.id}_${addr}`] ?? revealOptionId[poll.id]}
                                     </div>
                                   </div>
                                 ) : (

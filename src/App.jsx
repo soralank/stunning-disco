@@ -6,18 +6,24 @@ import AdminPage from './pages/AdminPage';
 import FranchiseePage from './pages/FranchiseePage';
 import ResultsPage from './pages/ResultsPage';
 
+const IS_DEV = process.env.NODE_ENV !== 'production';
+
 export default function App() {
   return (
     <Layout>
       <Routes>
-        <Route path="/" element={<Navigate to="/local/voter" replace />} />
+        <Route path="/" element={<Navigate to={IS_DEV ? "/local/voter" : "/voter"} replace />} />
 
-        {/* Local Testing Routes (Hardhat accounts - no MetaMask needed) */}
-        <Route path="/local" element={<Navigate to="/local/voter" replace />} />
-        <Route path="/local/voter" element={<VoterPage mode="local" />} />
-        <Route path="/local/admin" element={<AdminPage mode="local" />} />
-        <Route path="/local/franchisee" element={<FranchiseePage mode="local" />} />
-        <Route path="/local/results" element={<ResultsPage mode="local" />} />
+        {/* Local Testing Routes — only available in development builds */}
+        {IS_DEV && (
+          <>
+            <Route path="/local" element={<Navigate to="/local/voter" replace />} />
+            <Route path="/local/voter" element={<VoterPage mode="local" />} />
+            <Route path="/local/admin" element={<AdminPage mode="local" />} />
+            <Route path="/local/franchisee" element={<FranchiseePage mode="local" />} />
+            <Route path="/local/results" element={<ResultsPage mode="local" />} />
+          </>
+        )}
 
         {/* Production/Testnet Routes (MetaMask required) */}
         <Route path="/voter" element={<VoterPage mode="production" />} />

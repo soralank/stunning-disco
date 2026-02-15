@@ -34,7 +34,9 @@ export default function Layout({ children }) {
               <Link className={loc.pathname === '/franchisee' ? 'active' : ''} to="/franchisee">Franchisee</Link>
               <Link className={loc.pathname === '/voter' ? 'active' : ''} to="/voter">Voter</Link>
               <Link className={loc.pathname === '/results' ? 'active' : ''} to="/results">Results</Link>
-              <Link to="/local/voter" style={{ marginLeft: 20, color: '#999' }}>→ Local Testing</Link>
+              {process.env.NODE_ENV !== 'production' && (
+                <Link to="/local/voter" style={{ marginLeft: 20, color: '#999' }}>→ Local Testing</Link>
+              )}
             </>
           )}
         </nav>
