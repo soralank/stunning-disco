@@ -164,6 +164,7 @@ export default function ResultsList({ mode = 'production' }) {
           try { lastResult.isSecretBallot = await contract.secretBallot(i); } catch { lastResult.isSecretBallot = false; }
           try { lastResult.quadraticEnabled = await contract.quadraticVotingEnabled(i); } catch { lastResult.quadraticEnabled = false; }
           try { lastResult.maxChoices = Number(await contract.pollMaxChoices(i)); } catch { lastResult.maxChoices = 0; }
+          try { lastResult.delegationEnabled = await contract.delegationEnabled(i); } catch { lastResult.delegationEnabled = false; }
           try { lastResult.metadataURI = await contract.getPollMetadata(i); } catch { lastResult.metadataURI = ''; }
 
           // Secret ballot status
@@ -312,6 +313,7 @@ export default function ResultsList({ mode = 'production' }) {
                             {poll.isSecretBallot && <span className="chip" style={{ marginRight: 4 }}>Secret Ballot</span>}
                             {poll.quadraticEnabled && <span className="chip" style={{ marginRight: 4 }}>Quadratic</span>}
                             {poll.maxChoices > 0 && <span className="chip" style={{ marginRight: 4 }}>Multi-choice (max {poll.maxChoices})</span>}
+                            {poll.delegationEnabled && <span className="chip" style={{ marginRight: 4 }}>Delegation</span>}
                             {poll.isSecretBallot && poll.sbStatus && (
                               <div className="muted small" style={{ marginTop: 4 }}>
                                 Phase: {poll.sbStatus.inCommitPhase ? 'Commit' : poll.sbStatus.inRevealPhase ? 'Reveal' : 'Closed'} &bull;

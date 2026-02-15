@@ -521,17 +521,13 @@ export default function VoteList({ mode = 'production' }) {
         signer,
         sendTx: (overrides = {}) =>
           isTokenEnabled
-            ? sbmContract.commitVoteWithToken(pollId, commitHash, overrides)
-            : sbmContract.commitVote(pollId, commitHash, overrides),
+            ? sbmContract.commitVoteWithToken(pollId, optionId, salt, commitHash, overrides)
+            : sbmContract.commitVote(pollId, optionId, salt, commitHash, overrides),
         onRetry: () => setStatus('Retrying commit...')
       });
       await tx.wait();
 
-      // Store salt so voter can reveal later
-      setCommitSalt(prev => ({ ...prev, [pollId]: salt }));
-      setRevealOptionId(prev => ({ ...prev, [pollId]: optionId }));
-
-      setStatus(`✅ Vote committed for poll #${pollId}! SAVE YOUR SALT: ${salt}`);
+      setStatus(`✅ Vote recorded for poll #${pollId}! Results hidden until admin reveals.`);
       await loadPolls(addr);
     } catch (err) {
       setStatus(`Error: ${getContractErrorDetails(err).description}`);
@@ -1096,11 +1092,14 @@ export default function VoteList({ mode = 'production' }) {
               return (
                 <div
                   key={poll.id}
-                  className={`poll-card ${poll.hasVoted ? 'is-voted' : ''} ${poll.isActive ? 'is-active' : ''}`}
+                  className={`poll-card ${poll.hasVoted ? 'is-voted' : ''} ${isActiveEffective ? 'is-active' : ''}`}
                 >
                   <div className="poll-card__head">
                     <div>
-                      <h4 className="poll-title">{poll.title}</h4>
+                      <h4 className="poll-title">
+                        {poll.title}
+                        {poll.hasVoted && <span className="chip chip-success" style={{ marginLeft: 8 }}>✓ Voted</span>}
+                      </h4>
                       <div className="muted small">{timeLabel}</div>
                       {statusMessage && <div className="muted small">{statusMessage}</div>}
                       {poll.tokenConfig?.enabled && (
@@ -1121,7 +1120,6 @@ export default function VoteList({ mode = 'production' }) {
                         </div>
                       )}
                     </div>
-                    {poll.hasVoted && <span className="chip chip-success">Voted</span>}
                   </div>
 
                   <div className="poll-meta">

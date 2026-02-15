@@ -119,7 +119,8 @@ h1,h2,h3,h4,h5{
 
 .poll-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:16px;}
 .poll-card{border-radius:16px;border:var(--border);background:#ffffff;box-shadow:var(--shadow);padding:16px;display:flex;flex-direction:column;gap:12px;}
-.poll-card.is-voted{background:#f3fbf6;border-color:rgba(34, 197, 94, 0.2);}
+.poll-card.is-voted{background:#f0fdf4;border:2px solid rgba(34, 197, 94, 0.4);}
+.poll-card.is-voted .poll-title{color:#16a34a;}
 .poll-card__head{display:flex;flex-wrap:wrap;align-items:flex-start;justify-content:space-between;gap:10px;}
 .poll-title{margin:0;font-size:18px;word-break:break-word;}
 .poll-meta{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px;font-size:13px;color:var(--muted);}

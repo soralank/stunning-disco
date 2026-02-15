@@ -1807,6 +1807,19 @@
     {
       "inputs": [
         {
+          "internalType": "uint256",
+          "name": "duration",
+          "type": "uint256"
+        }
+      ],
+      "name": "setDefaultRevealDuration",
+      "outputs": [],
+      "stateMutability": "nonpayable",
+      "type": "function"
+    },
+    {
+      "inputs": [
+        {
           "internalType": "address",
           "name": "_fm",
           "type": "address"
@@ -1849,6 +1862,24 @@
         }
       ],
       "name": "setPollMetadata",
+      "outputs": [],
+      "stateMutability": "nonpayable",
+      "type": "function"
+    },
+    {
+      "inputs": [
+        {
+          "internalType": "uint256",
+          "name": "pollId",
+          "type": "uint256"
+        },
+        {
+          "internalType": "uint256",
+          "name": "duration",
+          "type": "uint256"
+        }
+      ],
+      "name": "setRevealDuration",
       "outputs": [],
       "stateMutability": "nonpayable",
       "type": "function"

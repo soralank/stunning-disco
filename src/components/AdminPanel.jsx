@@ -40,7 +40,8 @@ export default function AdminPanel({ mode = 'production', role }) {
   const [pollTitle, setPollTitle] = useState('');
   const [pollAdmin, setPollAdmin] = useState('');
   const [pollStartTime, setPollStartTime] = useState('');
-  const [pollDuration, setPollDuration] = useState('3600'); // 1 hour default
+  const [pollDuration, setPollDuration] = useState('3600');
+  const [pollRevealDuration, setPollRevealDuration] = useState('60'); // 1 hour default
   const [enableTokenVoting, setEnableTokenVoting] = useState(false);
   const [requireTokenVoting, setRequireTokenVoting] = useState(false);
   const [tokensPerVoter, setTokensPerVoter] = useState('1');
@@ -85,6 +86,7 @@ export default function AdminPanel({ mode = 'production', role }) {
   const [quadraticPollId, setQuadraticPollId] = useState('');
   const [multiChoicePollId, setMultiChoicePollId] = useState('');
   const [maxChoices, setMaxChoices] = useState('3');
+  const [delegationPollId, setDelegationPollId] = useState('');
   const [metadataPollId, setMetadataPollId] = useState('');
   const [metadataURI, setMetadataURI] = useState('');
   const [removeVoterPollId, setRemoveVoterPollId] = useState('');
@@ -412,7 +414,7 @@ export default function AdminPanel({ mode = 'production', role }) {
             status.active = false;
           }
 
-          pollsData.push({
+          const pollData = {
             id: i,
             title: poll.title,
             admin: poll.admin,
@@ -424,7 +426,23 @@ export default function AdminPanel({ mode = 'production', role }) {
             optionsCount: Number(optionsCount),
             tokenConfig,
             status
-          });
+          };
+
+          // Load options for revealed polls (so vote counts are always fresh)
+          if (status.revealed) {
+            const options = [];
+            for (let j = 1; j <= Number(optionsCount); j++) {
+              const option = await contract.getOption(i, j);
+              options.push({
+                id: Number(option[0]),
+                name: option[1],
+                votes: Number(option[2])
+              });
+            }
+            pollData.options = options;
+          }
+
+          pollsData.push(pollData);
 
           // Augment with new feature flags (best-effort)
           const lastPoll = pollsData[pollsData.length - 1];
@@ -433,10 +451,15 @@ export default function AdminPanel({ mode = 'production', role }) {
             try {
               const sbm = getSecretBallotManagerContract(provider);
               lastPoll.revealDuration = Number(await sbm.getRevealDuration(i));
-            } catch { lastPoll.revealDuration = 3600; }
+              lastPoll.commitCount = Number(await sbm.commitCount(i));
+            } catch {
+              lastPoll.revealDuration = 3600;
+              lastPoll.commitCount = 0;
+            }
           }
           try { lastPoll.quadraticEnabled = await contract.quadraticVotingEnabled(i); } catch { lastPoll.quadraticEnabled = false; }
           try { lastPoll.maxChoices = Number(await contract.pollMaxChoices(i)); } catch { lastPoll.maxChoices = 0; }
+          try { lastPoll.delegationEnabled = await contract.delegationEnabled(i); } catch { lastPoll.delegationEnabled = false; }
           try { lastPoll.metadataURI = await contract.getPollMetadata(i); } catch { lastPoll.metadataURI = ''; }
         } catch (pollErr) {
           console.warn(`Failed to load poll #${i}:`, pollErr.message);
@@ -639,9 +662,10 @@ export default function AdminPanel({ mode = 'production', role }) {
       const adminAddr = pollAdmin || addr;
       const duration = parseInt(pollDuration);
       const nowTs = Math.floor(Date.now() / 1000);
-      // Contract requires start time to be in the future
-      // Local mode: 15s buffer for quick testing; Production: 60s buffer
-      const defaultBuffer = mode === 'local' ? 15 : 60;
+      // If secret ballot is enabled, we need extra buffer time to set reveal duration
+      const hasSecretBallot = Number(pollRevealDuration) > 0;
+      // Increase buffer to 90 seconds for secret ballot to ensure we can set reveal duration
+      const defaultBuffer = hasSecretBallot ? 90 : (mode === 'local' ? 15 : 60);
       let startTs = pollStartTime ? parseDateTimeLocalToUnix(pollStartTime) : (nowTs + defaultBuffer);
 
       if (!startTs || Number.isNaN(startTs)) {
@@ -651,9 +675,11 @@ export default function AdminPanel({ mode = 'production', role }) {
       }
 
       // Ensure start time is at least a few seconds in the future (contract requirement)
-      if (startTs <= nowTs + 5) {
-        startTs = nowTs + defaultBuffer;
-        console.log('Start time adjusted to', startTs, `(now + ${defaultBuffer}s) to meet contract requirement`);
+      // For secret ballot, need at least 60s buffer to set reveal duration
+      const minBuffer = hasSecretBallot ? 60 : 5;
+      if (startTs <= nowTs + minBuffer) {
+        startTs = nowTs + (hasSecretBallot ? 90 : defaultBuffer);
+        console.log('Start time adjusted to', startTs, `(now + ${hasSecretBallot ? 90 : defaultBuffer}s) to meet contract requirement`);
       }
 
       if (!ethers.isAddress(adminAddr)) {
@@ -751,6 +777,8 @@ export default function AdminPanel({ mode = 'production', role }) {
       if (event) {
         const parsed = contract.interface.parseLog(event);
         const pollId = parsed.args[0];
+
+        // Configure token voting if enabled
         if (enableTokenVoting) {
           setStatus('Configuring token voting...');
           const configureTx = await sendTxWithNonceRetry({
@@ -768,8 +796,41 @@ export default function AdminPanel({ mode = 'production', role }) {
           await configureTx.wait();
         }
 
+        // Enable secret ballot and set reveal duration if provided
+        const revealMins = Number(pollRevealDuration);
+        if (revealMins > 0) {
+          try {
+            setStatus('Enabling secret ballot...');
+            const sbTx = await sendTxWithNonceRetry({
+              signer,
+              sendTx: (overrides = {}) => contract.enableSecretBallot(pollId, overrides),
+              onRetry: () => setStatus('Retrying enableSecretBallot...')
+            });
+            await sbTx.wait();
+
+            // Set reveal duration using the new ElectionsManager function
+            const revealSecs = revealMins * 60;
+            setStatus(`Setting reveal duration to ${revealMins} minutes...`);
+
+            const rdTx = await sendTxWithNonceRetry({
+              signer,
+              sendTx: (overrides = {}) => contract.setRevealDuration(pollId, revealSecs, overrides),
+              onRetry: () => setStatus('Retrying setRevealDuration...')
+            });
+            await rdTx.wait();
+          } catch (sbErr) {
+            console.error('Secret ballot setup error:', sbErr);
+            const details = getContractErrorDetails(sbErr);
+            console.error('Full error details:', details);
+            setStatus(`⚠️  Secret ballot enabled, but failed to set reveal duration: ${details.description}. Using default 60 minutes.`);
+            // Don't throw - poll was created successfully, and continue to show success
+          }
+        }
+
         setStatus(
-          enableTokenVoting
+          revealMins > 0
+            ? `✅ Poll created with secret ballot (${revealMins} min reveal window)! ID: ${pollId}`
+            : enableTokenVoting
             ? `✅ Poll created and token voting configured! ID: ${pollId}`
             : `✅ Poll created! ID: ${pollId}`
         );
@@ -781,6 +842,7 @@ export default function AdminPanel({ mode = 'production', role }) {
       setPollAdmin('');
       setPollStartTime('');
       setPollDuration('3600');
+      setPollRevealDuration('60');
       setEnableTokenVoting(false);
       setRequireTokenVoting(false);
       setTokensPerVoter('1');
@@ -1188,15 +1250,14 @@ export default function AdminPanel({ mode = 'production', role }) {
       await tx.wait();
       setStatus(`✅ Secret ballot enabled for poll #${secretBallotPollId}`);
 
-      // Set custom reveal duration if not default (60 min)
+      // Set custom reveal duration
       const revealSecs = Number(revealDurationMinutes) * 60;
-      if (revealSecs > 0 && revealSecs !== 3600) {
+      if (revealSecs > 0) {
         try {
           setStatus(`Setting reveal duration to ${revealDurationMinutes} minutes...`);
-          const sbm = getSecretBallotManagerContract(signer);
           const rdTx = await sendTxWithNonceRetry({
             signer,
-            sendTx: (overrides = {}) => sbm.setRevealDuration(secretBallotPollId, revealSecs, overrides),
+            sendTx: (overrides = {}) => contract.setRevealDuration(secretBallotPollId, revealSecs, overrides),
             onRetry: () => setStatus('Retrying setRevealDuration...')
           });
           await rdTx.wait();
@@ -1228,6 +1289,29 @@ export default function AdminPanel({ mode = 'production', role }) {
       });
       await tx.wait();
       setStatus(`✅ Quadratic voting enabled for poll #${quadraticPollId}`);
+      await loadPolls();
+    } catch (err) {
+      setStatus(`Error: ${getContractErrorDetails(err).description}`);
+    } finally { setLoading(false); }
+  }
+
+  // ─── Enable Delegation for a poll ──────────────────────────────────────────
+  async function enableDelegationForPoll(e) {
+    e.preventDefault();
+    setStatus(null);
+    setLoading(true);
+    try {
+      if (!delegationPollId) { setStatus('Select a poll first'); setLoading(false); return; }
+      const signer = walletSigner || await getSigner();
+      const contract = getContract(signer);
+      setStatus('Enabling vote delegation...');
+      const tx = await sendTxWithNonceRetry({
+        signer,
+        sendTx: (overrides = {}) => contract.enableDelegation(delegationPollId, overrides),
+        onRetry: () => setStatus('Retrying enableDelegation...')
+      });
+      await tx.wait();
+      setStatus(`✅ Vote delegation enabled for poll #${delegationPollId}`);
       await loadPolls();
     } catch (err) {
       setStatus(`Error: ${getContractErrorDetails(err).description}`);
@@ -1676,9 +1760,13 @@ export default function AdminPanel({ mode = 'production', role }) {
     if (expandedPoll === pollId) {
       setExpandedPoll(null);
     } else {
-      const details = await loadPollDetails(pollId);
-      if (details) {
-        setPolls(polls.map(p => p.id === pollId ? { ...p, options: details.options } : p));
+      const currentPoll = polls.find(p => p.id === pollId);
+      // Always reload options for revealed polls to get fresh vote counts
+      if (!currentPoll?.options || currentPoll?.revealed) {
+        const details = await loadPollDetails(pollId);
+        if (details) {
+          setPolls(polls.map(p => p.id === pollId ? { ...p, options: details.options } : p));
+        }
       }
       setExpandedPoll(pollId);
     }
@@ -1813,13 +1901,17 @@ export default function AdminPanel({ mode = 'production', role }) {
   });
 
   // ─── Filtered + paginated dashboard polls ──────────────────────────────────
+  // First filter to "my polls" (franchisee-scoped or all for owner)
+  const myPolls = useMemo(() => {
+    if (addr && isFranchiseeRole) {
+      return polls.filter(p => p.admin?.toLowerCase() === addr.toLowerCase());
+    }
+    return polls;
+  }, [polls, addr, isFranchiseeRole]);
+
   const filteredPolls = useMemo(() => {
     const nowTs = Math.floor(Date.now() / 1000);
-    let result = [...polls];
-    // Owner sees all polls; franchisees/admins see only their own
-    if (addr && isFranchiseeRole) {
-      result = result.filter(p => p.admin?.toLowerCase() === addr.toLowerCase());
-    }
+    let result = [...myPolls];
     // Text search
     if (dashboardSearch.trim()) {
       const q = dashboardSearch.toLowerCase();
@@ -1845,7 +1937,7 @@ export default function AdminPanel({ mode = 'production', role }) {
       });
     }
     return result;
-  }, [polls, dashboardSearch, dashboardFilter, addr]);
+  }, [myPolls, dashboardSearch, dashboardFilter]);
 
   const dashboardPollsPage = useMemo(() => {
     const start = (dashboardPage - 1) * dashboardPageSize;
@@ -2015,7 +2107,7 @@ export default function AdminPanel({ mode = 'production', role }) {
           {polls.length > 0 ? (
             <section className="panel-card panel-card--wide">
               <div className="panel-head">
-                <h3>{isOwner ? 'Manage Polls' : 'My Polls'} ({filteredPolls.length} of {polls.length})</h3>
+                <h3>{isOwner ? 'Manage Polls' : 'My Polls'} ({filteredPolls.length} of {myPolls.length})</h3>
                 {(isOwner || isFranchisee) && <button className="btn btn-sm" onClick={() => setActiveTab('create')}>+ New Poll</button>}
               </div>
 
@@ -2112,19 +2204,20 @@ export default function AdminPanel({ mode = 'production', role }) {
                                     </span>
                                   ))}
                                 </div>
-                                {!poll.revealed && poll.totalVotes > 0 && (
+                                {!poll.revealed && (poll.isSecretBallot ? poll.commitCount : poll.totalVotes) > 0 && (
                                   <div className="muted small" style={{ marginTop: '0.5rem' }}>
-                                    🔒 {poll.totalVotes} vote{poll.totalVotes !== 1 ? 's' : ''} cast — per-candidate breakdown hidden until results are revealed.
+                                    🔒 {poll.isSecretBallot ? poll.commitCount : poll.totalVotes} {poll.isSecretBallot ? 'commit' : 'vote'}{(poll.isSecretBallot ? poll.commitCount : poll.totalVotes) !== 1 ? 's' : ''} cast — per-candidate breakdown hidden until results are revealed.
                                   </div>
                                 )}
-                                {!poll.revealed && poll.totalVotes === 0 && (
+                                {!poll.revealed && (poll.isSecretBallot ? poll.commitCount : poll.totalVotes) === 0 && (
                                   <div className="muted small" style={{ marginTop: '0.5rem' }}>
-                                    No votes cast yet.
+                                    No {poll.isSecretBallot ? 'commits' : 'votes'} cast yet.
                                   </div>
                                 )}
                                 {poll.isSecretBallot && <span className="chip" style={{ marginTop: '0.25rem' }}>Secret Ballot</span>}
                                 {poll.quadraticEnabled && <span className="chip" style={{ marginTop: '0.25rem' }}>Quadratic</span>}
                                 {poll.maxChoices > 0 && <span className="chip" style={{ marginTop: '0.25rem' }}>Multi-choice (max {poll.maxChoices})</span>}
+                                {poll.delegationEnabled && <span className="chip" style={{ marginTop: '0.25rem' }}>Delegation</span>}
                                 {poll.metadataURI && <div className="muted small" style={{ marginTop: '0.25rem', wordBreak: 'break-all' }}>Metadata: {poll.metadataURI}</div>}
                               </td>
                             </tr>
@@ -2220,6 +2313,22 @@ export default function AdminPanel({ mode = 'production', role }) {
                   className="form-input"
                 />
                 <div className="muted small">Suggested: 300 (5 min), 3600 (1 hour), 86400 (1 day)</div>
+
+                <label className="form-label">Reveal Duration (minutes) <span className="muted small">— for secret ballot</span></label>
+                <input
+                  type="number"
+                  min="1"
+                  placeholder="Reveal duration (minutes)"
+                  value={pollRevealDuration}
+                  onChange={e => setPollRevealDuration(e.target.value)}
+                  className="form-input"
+                />
+                <div className="muted small">
+                  Time window for voters to reveal their secret votes after poll ends. Default: 60 minutes.
+                  {Number(pollRevealDuration) > 0 && (
+                    <strong> Note: Polls with secret ballot will start 90 seconds from creation to allow configuration time.</strong>
+                  )}
+                </div>
 
                 <button type="submit" className="btn" disabled={loading}>
                   {loading ? 'Creating...' : 'Create Poll'}
@@ -2602,6 +2711,20 @@ export default function AdminPanel({ mode = 'production', role }) {
                 />
                 <button type="submit" className="btn secondary" disabled={loading}>
                   {loading ? 'Setting...' : 'Set Max Choices'}
+                </button>
+              </form>
+
+              <hr style={{ margin: '16px 0', opacity: 0.1 }} />
+
+              <form onSubmit={enableDelegationForPoll} className="form-stack">
+                <label className="form-label">Vote Delegation <span className="muted small">(allow voters to delegate)</span></label>
+                <PollSelect
+                  value={delegationPollId}
+                  onChange={e => setDelegationPollId(e.target.value)}
+                  filterFn={p => !p.ended && !p.delegationEnabled}
+                />
+                <button type="submit" className="btn secondary" disabled={loading}>
+                  {loading ? 'Enabling...' : 'Enable Delegation'}
                 </button>
               </form>
             </section>
