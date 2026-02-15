@@ -2178,12 +2178,15 @@ export default function AdminPanel({ mode = 'production', role }) {
                                     )}
                                     {waitingForRevealPeriod && (
                                       <>
-                                        <button className="btn btn-sm" onClick={() => revealResults(poll.id)} disabled={loading}>
-                                          Reveal
-                                        </button>
+                                        {/* For secret ballots: hide Reveal button during voter reveal period — voters must reveal first */}
+                                        {!poll.isSecretBallot && (
+                                          <button className="btn btn-sm" onClick={() => revealResults(poll.id)} disabled={loading}>
+                                            Reveal
+                                          </button>
+                                        )}
                                         <span className="muted small" style={{ alignSelf: 'center' }}>
                                           {poll.isSecretBallot
-                                            ? `Reveal period (${revealMins}m ${revealSecs}s left)`
+                                            ? `⏳ Voters revealing (${revealMins}m ${revealSecs}s left) — ${poll.sbStatus?.reveals ?? '?'}/${poll.sbStatus?.commits ?? '?'} revealed`
                                             : `Finalizing (${revealSecs}s)...`}
                                         </span>
                                       </>

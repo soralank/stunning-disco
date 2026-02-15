@@ -99,6 +99,80 @@ export default function VoteList({ mode = 'production' }) {
     return filteredVoterPolls.slice(start, start + voterPageSize);
   }, [filteredVoterPolls, voterPage, voterPageSize]);
 
+  // ── Auto-reveal effect: runs every 10s, checks for pending reveals ──────
+  useEffect(() => {
+    if (!addr) return;
+    let cancelled = false;
+
+    async function tryAutoReveal() {
+      let salts, options;
+      try {
+        salts = JSON.parse(localStorage.getItem('__sb_salts') || '{}');
+        options = JSON.parse(localStorage.getItem('__sb_options') || '{}');
+      } catch { return; }
+
+      const pendingKeys = Object.keys(salts).filter(k => k.includes('_'));
+      if (pendingKeys.length === 0) return;
+
+      const provider = getEffectiveProvider();
+      const contract = getContract(provider);
+      const sbmRead = getSecretBallotManagerContract(provider);
+
+      for (const key of pendingKeys) {
+        if (cancelled) break;
+        const [pollIdStr, voterAddr] = key.split('_');
+        // Only process salts belonging to the current connected address
+        if (voterAddr.toLowerCase() !== addr.toLowerCase()) continue;
+        const pollId = Number(pollIdStr);
+        const salt = salts[key];
+        const optId = options[key];
+        if (!salt || optId == null) continue;
+
+        try {
+          const alreadyRevealed = await sbmRead.hasRevealed(pollId, voterAddr);
+          if (alreadyRevealed) {
+            // Clean up — already done
+            setCommitSalt(prev => { const n = { ...prev }; delete n[key]; return n; });
+            setRevealOptionId(prev => { const n = { ...prev }; delete n[key]; return n; });
+            continue;
+          }
+
+          const hasCommitted = await sbmRead.hasCommitted(pollId, voterAddr);
+          if (!hasCommitted) continue;
+
+          // Check if poll has ended (reveal phase requires poll to be ended)
+          const poll = await contract.polls(pollId);
+          const endTime = Number(poll.endTime);
+          const nowTs = Math.floor(Date.now() / 1000);
+          if (nowTs < endTime) continue; // poll still active, wait
+
+          // Attempt the reveal — let the contract decide if it's still allowed
+          console.log(`[Auto-reveal] Attempting reveal for poll #${pollId}...`);
+          const signer = walletSigner || await getSigner();
+          const sbmSigner = getSecretBallotManagerContract(signer);
+          const tx = await sendTxWithNonceRetry({
+            signer,
+            sendTx: (overrides = {}) => sbmSigner.revealVote(pollId, optId, salt, overrides),
+            onRetry: () => console.log(`[Auto-reveal] Retrying for poll #${pollId}...`)
+          });
+          await tx.wait();
+          console.log(`[Auto-reveal] Successfully revealed vote for poll #${pollId}`);
+          setCommitSalt(prev => { const n = { ...prev }; delete n[key]; return n; });
+          setRevealOptionId(prev => { const n = { ...prev }; delete n[key]; return n; });
+          // Refresh polls to show updated state
+          if (!cancelled) await loadPolls(addr);
+        } catch (err) {
+          console.warn(`[Auto-reveal] Failed for poll #${pollId}:`, err.message?.substring(0, 150));
+        }
+      }
+    }
+
+    // Run immediately on connect, then every 10 seconds
+    tryAutoReveal();
+    const interval = setInterval(tryAutoReveal, 10_000);
+    return () => { cancelled = true; clearInterval(interval); };
+  }, [addr, walletSigner]); // eslint-disable-line
+
   async function connectWallet() {
     setStatus(null);
     try {
@@ -327,37 +401,7 @@ export default function VoteList({ mode = 'production' }) {
                 inRevealPhase: sbStatus.inRevealPhase ?? sbStatus[4]
               };
               try { lastPoll.revealDeadline = Number(await sbmContract.getRevealDeadline(i)); } catch { lastPoll.revealDeadline = 0; }
-
-              // ── Auto-reveal: if reveal phase is open and we have the salt, reveal automatically ──
-              const nowAuto = Math.floor(Date.now() / 1000);
-              const revealPhaseOpen = lastPoll.sbStatus.inRevealPhase ||
-                (status.ended && lastPoll.revealDeadline && nowAuto < lastPoll.revealDeadline && nowAuto >= (endTime + 30));
-              if (lastPoll.hasCommitted && !lastPoll.hasRevealed && revealPhaseOpen) {
-                const saltKey = `${i}_${voterAddress}`;
-                const salt = commitSalt[saltKey] || commitSalt[i];
-                const optId = revealOptionId[saltKey] ?? revealOptionId[i];
-                if (salt && optId != null) {
-                  try {
-                    console.log(`Auto-revealing vote for poll #${i}...`);
-                    const autoSigner = walletSigner || await getSigner();
-                    const sbmSigner = getSecretBallotManagerContract(autoSigner);
-                    const revealTx = await sendTxWithNonceRetry({
-                      signer: autoSigner,
-                      sendTx: (overrides = {}) => sbmSigner.revealVote(i, optId, salt, overrides),
-                      onRetry: () => console.log(`Retrying auto-reveal for poll #${i}...`)
-                    });
-                    await revealTx.wait();
-                    console.log(`Auto-revealed vote for poll #${i} successfully`);
-                    lastPoll.hasRevealed = true;
-                    lastPoll.sbStatus.reveals += 1;
-                    // Clean up saved salt
-                    setCommitSalt(prev => { const n = { ...prev }; delete n[saltKey]; delete n[i]; return n; });
-                    setRevealOptionId(prev => { const n = { ...prev }; delete n[saltKey]; delete n[i]; return n; });
-                  } catch (autoErr) {
-                    console.warn(`Auto-reveal failed for poll #${i}:`, autoErr.message);
-                  }
-                }
-              }
+              // Auto-reveal is handled by the dedicated useEffect timer — not inline here
             } catch (sbErr) {
               console.warn('SBM status error for poll', i, sbErr.message);
               lastPoll.hasCommitted = false;
@@ -582,46 +626,15 @@ export default function VoteList({ mode = 'production' }) {
       setCommitSalt(prev => ({ ...prev, [saltKey]: salt }));
       setRevealOptionId(prev => ({ ...prev, [saltKey]: optionId }));
 
-      setStatus(`✅ Vote recorded for poll #${pollId}! Results hidden until admin reveals.`);
+      setStatus(`✅ Vote securely recorded for poll #${pollId}! Results will be published by the administrator.`);
       await loadPolls(addr);
     } catch (err) {
       setStatus(`Error: ${getContractErrorDetails(err).description}`);
     }
   }
 
-  // ─── Secret Ballot: Reveal Vote ──────────────────────────────────────────
-  async function revealSecretVote(pollId) {
-    setStatus(null);
-    try {
-      const signer = walletSigner || await getSigner();
-      const sbmContract = getSecretBallotManagerContract(signer);
-      const voterAddress = await signer.getAddress();
-      const saltKey = `${pollId}_${voterAddress}`;
-
-      // Check new key format first, fallback to legacy pollId-only key
-      const salt = commitSalt[saltKey] || commitSalt[pollId];
-      const optionId = revealOptionId[saltKey] ?? revealOptionId[pollId];
-      if (!salt || optionId == null) {
-        setStatus('Error: No saved salt/option for this poll. Enter them manually.');
-        return;
-      }
-
-      setStatus('Revealing vote...');
-      const tx = await sendTxWithNonceRetry({
-        signer,
-        sendTx: (overrides = {}) => sbmContract.revealVote(pollId, optionId, salt, overrides),
-        onRetry: () => setStatus('Retrying reveal...')
-      });
-      await tx.wait();
-
-      setStatus(`✅ Vote revealed for poll #${pollId}`);
-      setCommitSalt(prev => { const n = { ...prev }; delete n[saltKey]; delete n[pollId]; return n; });
-      setRevealOptionId(prev => { const n = { ...prev }; delete n[saltKey]; delete n[pollId]; return n; });
-      await loadPolls(addr);
-    } catch (err) {
-      setStatus(`Error: ${getContractErrorDetails(err).description}`);
-    }
-  }
+  // Secret ballot reveal is handled automatically by the auto-reveal useEffect.
+  // No manual voter interaction is needed after voting.
 
   // ─── Gasless Voting (EIP-712 Meta-Transaction) ────────────────────────────
   async function voteGasless(pollId, optionId) {
@@ -1215,22 +1228,18 @@ export default function VoteList({ mode = 'production' }) {
                       <div><span>Delegations received</span><strong>{poll.delegation.delegationsReceived}</strong></div>
                     )}
                     {poll.isSecretBallot && poll.sbStatus && (() => {
-                      // Compute phase locally from timestamps for accuracy
-                      // Contract's isPollActive uses block.timestamp which may lag
-                      const sbCommit = poll.sbStatus.inCommitPhase || isActiveEffective;
-                      const sbReveal = poll.sbStatus.inRevealPhase ||
-                        (isEndedEffective && poll.revealDeadline && nowTs < poll.revealDeadline && nowTs >= (poll.endTime + 30));
-                      const phase = sbCommit ? 'Commit' : sbReveal ? 'Reveal' : isUpcoming ? 'Not Started' : 'Closed';
-                      const phaseClass = sbCommit ? '' : sbReveal ? 'chip-warning' : isUpcoming ? '' : 'chip-success';
+                      const isVotingOpen = poll.sbStatus.inCommitPhase || isActiveEffective;
+                      const phase = isVotingOpen ? 'Open' : isUpcoming ? 'Not Started' : 'Closed';
+                      const phaseClass = isVotingOpen ? '' : isUpcoming ? '' : 'chip-success';
                       return (
                         <>
                           <div>
-                            <span>Phase</span>
+                            <span>Status</span>
                             <strong>
-                              <span className={`chip ${phaseClass}`}>{phase}</span>
+                              <span className={`chip ${phaseClass}`}>🔒 {phase}</span>
                             </strong>
                           </div>
-                          <div><span>Commits / Reveals</span><strong>{poll.sbStatus.commits} / {poll.sbStatus.reveals}</strong></div>
+                          <div><span>Votes cast</span><strong>{poll.sbStatus.commits}</strong></div>
                         </>
                       );
                     })()}
@@ -1259,59 +1268,28 @@ export default function VoteList({ mode = 'production' }) {
                         </div>
                       )}
 
-                      {/* ─── Secret Ballot: Commit Phase ─────────────── */}
+                      {/* ─── Secret Ballot: Vote (commit phase) ─────────────── */}
                       {poll.isSecretBallot && (poll.sbStatus?.inCommitPhase || isActiveEffective) && !poll.hasCommitted && !poll.hasVoted && isActiveEffective && (
                         <>
                           <div className="info-banner">
-                            🔒 Secret Ballot — Choose a candidate to commit your hidden vote. You will reveal it later.
+                            🔒 Secret Ballot — Your vote is encrypted and hidden until results are published.
                           </div>
                           {poll.options.map(option => (
                             <div key={option.id} className="option-row">
                               <div><strong>{option.name}</strong></div>
                               <button className="btn" onClick={() => commitSecretVote(poll.id, option.id)}>
-                                Commit Vote
+                                Vote
                               </button>
                             </div>
                           ))}
                         </>
                       )}
 
-                      {/* ─── Secret Ballot: Committed, awaiting reveal ── */}
-                      {poll.isSecretBallot && poll.hasCommitted && !poll.hasRevealed && (() => {
-                        const revealOpen = poll.sbStatus?.inRevealPhase ||
-                          (isEndedEffective && poll.revealDeadline && nowTs < poll.revealDeadline && nowTs >= (poll.endTime + 30));
-                        const stillCommit = poll.sbStatus?.inCommitPhase || isActiveEffective;
-                        return (
-                          <div className="info-banner">
-                            ✅ You have committed your vote.
-                            {revealOpen && (
-                              <>
-                                {' '}Reveal phase is open{poll.revealDeadline ? ` until ${formatDateTime(poll.revealDeadline)}` : ''}.
-                                {(commitSalt[`${poll.id}_${addr}`] || commitSalt[poll.id]) ? (
-                                  <div style={{ marginTop: 8 }}>
-                                    <button className="btn" onClick={() => revealSecretVote(poll.id)}>
-                                      Reveal Vote Now
-                                    </button>
-                                    <div className="muted small" style={{ marginTop: 4 }}>
-                                      Saved salt: {commitSalt[`${poll.id}_${addr}`] || commitSalt[poll.id]} | Option: {revealOptionId[`${poll.id}_${addr}`] ?? revealOptionId[poll.id]}
-                                    </div>
-                                  </div>
-                                ) : (
-                                  <div className="muted small" style={{ marginTop: 4 }}>
-                                    Salt not found in session. If you committed from another session, you need to reveal manually.
-                                  </div>
-                                )}
-                              </>
-                            )}
-                            {stillCommit && !revealOpen && (
-                              <> Reveal phase has not started yet.</>
-                            )}
-                          </div>
-                        );
-                      })()}
-
-                      {poll.isSecretBallot && poll.hasRevealed && (
-                        <div className="info-banner">✅ You have revealed your vote.</div>
+                      {/* ─── Secret Ballot: Already voted ── */}
+                      {poll.isSecretBallot && (poll.hasCommitted || poll.hasVoted) && (
+                        <div className="info-banner">
+                          ✅ Your vote has been securely recorded. Results will be published by the administrator.
+                        </div>
                       )}
 
                       {/* ─── Quadratic Voting ────────────────────────── */}
