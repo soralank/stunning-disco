@@ -1,4 +1,13 @@
 # Testing Guide - Local vs Production Mode
+This project is proprietary and licensed under Ankit Soral's terms. Unauthorized use is prohibited.
+
+**Project Status:** React frontend and smart contract integration are complete. Only a professional security audit is pending.
+
+**License:** Copyright (c) 2026 Ankit Soral. All rights reserved.
+
+**Contact:** ankit.soral@outlokk.com
+
+For licensing or audit inquiries, contact Ankit Soral.
 
 ## What's New
 

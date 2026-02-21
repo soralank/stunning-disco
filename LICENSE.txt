@@ -1,0 +1,10 @@
+Copyright (c) 2026 Ankit Soral
+
+All rights reserved.
+
+This software and its source code are proprietary to Ankit Soral. Unauthorized copying, distribution, modification, or use of this code, in whole or in part, is strictly prohibited without explicit written permission from Ankit Soral.
+
+By accessing or using this software, you agree to abide by these terms.
+
+For licensing inquiries, please contact Ankit Soral.
+

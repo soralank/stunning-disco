@@ -1,4 +1,11 @@
 # Stunning Disco Voting System — Architecture Overview
+This project is proprietary and licensed under Ankit Soral's terms. Unauthorized use is prohibited.
+
+**Project Status:** React frontend and smart contract integration are complete. Only a professional security audit is pending.
+
+**License:** Copyright (c) 2026 Ankit Soral. All rights reserved.
+
+For licensing or audit inquiries, contact Ankit Soral.
 
 ## System Overview
 Stunning Disco is a decentralized voting platform built with a React frontend and Ethereum smart contracts. It supports multiple poll types, secret ballots, gasless voting, and franchisee-based poll management.
