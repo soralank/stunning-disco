@@ -27,4 +27,4 @@ Thank you for your interest in contributing to this project! Please follow these
 This project is proprietary and licensed under Ankit Soral's terms. Please respect the license and do not use the code without permission.
 
 ---
-For questions, contact Ankit Soral.
+Contact: ankit.soral@outlook.com
