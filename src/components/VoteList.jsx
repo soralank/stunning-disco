@@ -99,10 +99,99 @@ export default function VoteList({ mode = 'production' }) {
     return filteredVoterPolls.slice(start, start + voterPageSize);
   }, [filteredVoterPolls, voterPage, voterPageSize]);
 
-  // ── Auto-reveal effect: runs every 10s, checks for pending reveals ──────
+  // ── Helper: get a signer for any Hardhat account by address (local mode) ──
+  function getSignerForAccount(voterAddr) {
+    if (mode !== 'local') return null;
+    const account = HARDHAT_ACCOUNTS.find(a => a.address.toLowerCase() === voterAddr.toLowerCase());
+    if (!account) return null;
+    const provider = getEffectiveProvider();
+    return new ethers.Wallet(account.key, provider);
+  }
+
+  // ── Reveal a single secret ballot vote (used by auto-reveal and manual button) ──
+  async function revealSecretVote(pollId, optionId, salt, voterAddr) {
+    // Get the right signer: if local mode, use the matching Hardhat account
+    let signer;
+    if (mode === 'local') {
+      signer = getSignerForAccount(voterAddr);
+      if (!signer) throw new Error(`No local signer for ${voterAddr}`);
+    } else {
+      signer = walletSigner || await getSigner();
+    }
+    const sbmSigner = getSecretBallotManagerContract(signer);
+    const tx = await sendTxWithNonceRetry({
+      signer,
+      sendTx: (overrides = {}) => sbmSigner.revealVote(pollId, optionId, salt, overrides),
+      onRetry: () => console.log(`[Reveal] Retrying for poll #${pollId}, voter ${voterAddr.slice(0, 8)}...`)
+    });
+    await tx.wait();
+    return tx;
+  }
+
+  // ── Manual reveal handler (called from UI button) ──
+  async function handleManualReveal(pollId) {
+    setStatus(null);
+    try {
+      let salts, options;
+      try {
+        salts = JSON.parse(localStorage.getItem('__sb_salts') || '{}');
+        options = JSON.parse(localStorage.getItem('__sb_options') || '{}');
+      } catch { setStatus('Error: Could not read saved vote data'); return; }
+
+      // In local mode, reveal for ALL accounts that have pending reveals for this poll
+      const keysForPoll = Object.keys(salts).filter(k => {
+        const [pidStr] = k.split('_');
+        return Number(pidStr) === Number(pollId) && salts[k] && options[k] != null;
+      });
+
+      if (keysForPoll.length === 0) {
+        setStatus('No pending secret votes found for this poll. Votes may have already been revealed.');
+        return;
+      }
+
+      let revealed = 0;
+      let failed = 0;
+      for (const key of keysForPoll) {
+        const [, voterAddr] = key.split('_');
+        const salt = salts[key];
+        const optId = options[key];
+        try {
+          const provider = getEffectiveProvider();
+          const sbmRead = getSecretBallotManagerContract(provider);
+          const alreadyRevealed = await sbmRead.hasRevealed(pollId, voterAddr);
+          if (alreadyRevealed) {
+            setCommitSalt(prev => { const n = { ...prev }; delete n[key]; return n; });
+            setRevealOptionId(prev => { const n = { ...prev }; delete n[key]; return n; });
+            revealed++;
+            continue;
+          }
+          setStatus(`Revealing vote for ${voterAddr.slice(0, 8)}... (${revealed + 1}/${keysForPoll.length})`);
+          await revealSecretVote(pollId, optId, salt, voterAddr);
+          setCommitSalt(prev => { const n = { ...prev }; delete n[key]; return n; });
+          setRevealOptionId(prev => { const n = { ...prev }; delete n[key]; return n; });
+          revealed++;
+          console.log(`[Manual reveal] Revealed for ${voterAddr.slice(0, 10)} on poll #${pollId}`);
+        } catch (err) {
+          failed++;
+          console.warn(`[Manual reveal] Failed for ${voterAddr.slice(0, 10)} on poll #${pollId}:`, err.message?.substring(0, 150));
+        }
+      }
+      if (failed > 0) {
+        setStatus(`Revealed ${revealed} vote(s), ${failed} failed (check console). The reveal window may have closed.`);
+      } else {
+        setStatus(`✅ Revealed ${revealed} vote(s) for poll #${pollId}!`);
+      }
+      await loadPolls(addr);
+    } catch (err) {
+      setStatus(`Error: ${getContractErrorDetails(err).description}`);
+    }
+  }
+
+  // ── Auto-reveal effect: runs every 5s, checks for pending reveals ──────
   useEffect(() => {
     if (!addr) return;
     let cancelled = false;
+    const TIME_BUFFER = 30; // must match contract TIME_BUFFER
 
     async function tryAutoReveal() {
       let salts, options;
@@ -121,8 +210,11 @@ export default function VoteList({ mode = 'production' }) {
       for (const key of pendingKeys) {
         if (cancelled) break;
         const [pollIdStr, voterAddr] = key.split('_');
-        // Only process salts belonging to the current connected address
-        if (voterAddr.toLowerCase() !== addr.toLowerCase()) continue;
+
+        // In local mode, process ALL accounts (we have their keys).
+        // In production, only process the current connected address.
+        if (mode !== 'local' && voterAddr.toLowerCase() !== addr.toLowerCase()) continue;
+
         const pollId = Number(pollIdStr);
         const salt = salts[key];
         const optId = options[key];
@@ -140,23 +232,23 @@ export default function VoteList({ mode = 'production' }) {
           const hasCommitted = await sbmRead.hasCommitted(pollId, voterAddr);
           if (!hasCommitted) continue;
 
-          // Check if poll has ended (reveal phase requires poll to be ended)
+          // Check if poll has ended AND TIME_BUFFER has elapsed (contract requirement)
           const poll = await contract.polls(pollId);
           const endTime = Number(poll.endTime);
           const nowTs = Math.floor(Date.now() / 1000);
-          if (nowTs < endTime) continue; // poll still active, wait
+          if (nowTs < endTime + TIME_BUFFER) continue; // not yet in reveal window
 
-          // Attempt the reveal — let the contract decide if it's still allowed
-          console.log(`[Auto-reveal] Attempting reveal for poll #${pollId}...`);
-          const signer = walletSigner || await getSigner();
-          const sbmSigner = getSecretBallotManagerContract(signer);
-          const tx = await sendTxWithNonceRetry({
-            signer,
-            sendTx: (overrides = {}) => sbmSigner.revealVote(pollId, optId, salt, overrides),
-            onRetry: () => console.log(`[Auto-reveal] Retrying for poll #${pollId}...`)
-          });
-          await tx.wait();
-          console.log(`[Auto-reveal] Successfully revealed vote for poll #${pollId}`);
+          // Check reveal window hasn't closed
+          const revealDuration = Number(await sbmRead.getRevealDuration(pollId));
+          if (nowTs > endTime + TIME_BUFFER + revealDuration) {
+            console.warn(`[Auto-reveal] Reveal window closed for poll #${pollId}, voter ${voterAddr.slice(0, 10)}`);
+            continue; // don't waste gas on a doomed tx
+          }
+
+          // Attempt the reveal
+          console.log(`[Auto-reveal] Attempting reveal for poll #${pollId}, voter ${voterAddr.slice(0, 10)}...`);
+          await revealSecretVote(pollId, optId, salt, voterAddr);
+          console.log(`[Auto-reveal] Successfully revealed vote for poll #${pollId}, voter ${voterAddr.slice(0, 10)}`);
           setCommitSalt(prev => { const n = { ...prev }; delete n[key]; return n; });
           setRevealOptionId(prev => { const n = { ...prev }; delete n[key]; return n; });
           // Refresh polls to show updated state
@@ -167,11 +259,11 @@ export default function VoteList({ mode = 'production' }) {
       }
     }
 
-    // Run immediately on connect, then every 10 seconds
+    // Run immediately on connect, then every 5 seconds
     tryAutoReveal();
-    const interval = setInterval(tryAutoReveal, 10_000);
+    const interval = setInterval(tryAutoReveal, 5_000);
     return () => { cancelled = true; clearInterval(interval); };
-  }, [addr, walletSigner]); // eslint-disable-line
+  }, [addr, walletSigner, mode]); // eslint-disable-line
 
   async function connectWallet() {
     setStatus(null);
@@ -466,6 +558,18 @@ export default function VoteList({ mode = 'production' }) {
     }
   }
 
+  // Detect ties: multiple candidates sharing the highest vote count
+  function detectTie(options) {
+    if (!options || options.length === 0) return null;
+    const maxVotes = Math.max(...options.map(o => o.votes ?? 0));
+    if (maxVotes === 0) return null;
+    const topCandidates = options.filter(o => (o.votes ?? 0) === maxVotes);
+    if (topCandidates.length > 1) {
+      return { isTie: true, votes: maxVotes, candidates: topCandidates };
+    }
+    return null;
+  }
+
   async function vote(pollId, optionId) {
     setStatus(null);
     let contract;
@@ -635,6 +739,144 @@ export default function VoteList({ mode = 'production' }) {
 
   // Secret ballot reveal is handled automatically by the auto-reveal useEffect.
   // No manual voter interaction is needed after voting.
+
+  // ─── Gasless Secret Ballot: Sponsor gas from paymaster, voter commits ─────
+  async function commitSecretVoteGasless(pollId, optionId) {
+    setStatus(null);
+    try {
+      const signer = walletSigner || await getSigner();
+      const contract = getContract(signer);
+      const sbmContract = getSecretBallotManagerContract(signer);
+      const poll = polls.find(p => Number(p.id) === Number(pollId));
+      const voterAddress = await signer.getAddress();
+
+      // Generate a random salt
+      const salt = ethers.hexlify(ethers.randomBytes(32));
+      const commitHash = ethers.solidityPackedKeccak256(
+        ['uint256', 'uint256', 'bytes32', 'address'],
+        [pollId, optionId, salt, voterAddress]
+      );
+
+      // Detect token voting config
+      let isTokenEnabled = poll?.tokenConfig?.tokenRequired || poll?.tokenConfig?.enabled;
+      try {
+        const rawTokenConfig = await contract.getTokenConfig(pollId);
+        const tcEnabled = rawTokenConfig?.enabled ?? rawTokenConfig?.[0] ?? false;
+        const tcRequired = rawTokenConfig?.tokenRequired ?? rawTokenConfig?.[1] ?? false;
+        if (tcEnabled || tcRequired) isTokenEnabled = true;
+      } catch {}
+      try {
+        const rawPoll = await contract.polls(pollId);
+        const pEnabled = Boolean(rawPoll?.tokenVotingEnabled ?? rawPoll?.[9] ?? false);
+        const pRequired = Boolean(rawPoll?.tokenVotingRequired ?? rawPoll?.[10] ?? false);
+        if (pEnabled || pRequired) isTokenEnabled = true;
+      } catch {}
+
+      // Determine which commit function to call and estimate gas
+      const commitFn = isTokenEnabled ? 'commitVoteWithToken' : 'commitVote';
+      setStatus('Estimating gas for secret ballot commit...');
+
+      let gasEstimate;
+      try {
+        gasEstimate = await sbmContract[commitFn].estimateGas(pollId, commitHash);
+      } catch {
+        // Fallback: use a safe default (200k gas will cover any commit)
+        gasEstimate = 200000n;
+      }
+      // Add 30% safety margin
+      const gasNeeded = gasEstimate * 130n / 100n;
+      const feeData = await getEffectiveProvider().getFeeData();
+      const gasPrice = feeData.gasPrice || ethers.parseUnits('2', 'gwei');
+      const gasCostWei = gasNeeded * gasPrice;
+
+      // Step 1: Sponsor gas from paymaster → voter
+      setStatus('Sponsoring gas from paymaster...');
+
+      // Get the paymaster for this poll
+      const currentPoll = polls.find(p => Number(p.id) === Number(pollId));
+      let paymasterAddr;
+      if (currentPoll?.pollPaymaster) {
+        paymasterAddr = currentPoll.pollPaymaster;
+      } else {
+        // Use global paymaster
+        const globalPm = getVotingPaymasterContract(getEffectiveProvider());
+        paymasterAddr = await globalPm.getAddress();
+      }
+      const pmAbi = require('../contract/votingPaymaster.abi.json');
+
+      if (mode === 'local') {
+        // In local mode, use the relayer (account #0) to:
+        // 1) Withdraw gas cost from paymaster (as paymaster deployer/owner)
+        // 2) Forward that ETH to the voter
+        const provider = getEffectiveProvider();
+        const relayerKey = HARDHAT_ACCOUNTS[0]?.key;
+        const relayerSigner = relayerKey
+          ? new ethers.Wallet(relayerKey, provider)
+          : await provider.getSigner(0);
+
+        // Try to withdraw from paymaster. The deployer of the paymaster can withdraw.
+        // If that fails (access control), the relayer just sends from its own funds.
+        let sponsoredFromPaymaster = false;
+        try {
+          const pmAsRelayer = new ethers.Contract(paymasterAddr, pmAbi, relayerSigner);
+          const withdrawTx = await pmAsRelayer.withdraw(gasCostWei);
+          await withdrawTx.wait();
+          sponsoredFromPaymaster = true;
+        } catch (withdrawErr) {
+          console.warn('Paymaster withdraw failed (will use relayer funds):', withdrawErr.message?.substring(0, 100));
+          // Try as the franchisee (account #2) who deployed the paymaster
+          try {
+            for (let i = 1; i < HARDHAT_ACCOUNTS.length; i++) {
+              try {
+                const fSigner = new ethers.Wallet(HARDHAT_ACCOUNTS[i].key, provider);
+                const pmAsFranchisee = new ethers.Contract(paymasterAddr, pmAbi, fSigner);
+                const withdrawTx = await pmAsFranchisee.withdraw(gasCostWei);
+                await withdrawTx.wait();
+                // Send withdrawn ETH from franchisee to relayer so relayer can forward to voter
+                const fwdTx = await fSigner.sendTransaction({ to: await relayerSigner.getAddress(), value: gasCostWei });
+                await fwdTx.wait();
+                sponsoredFromPaymaster = true;
+                break;
+              } catch { /* try next account */ }
+            }
+          } catch {}
+        }
+
+        // Send gas cost to voter (relayer pays, funded from paymaster withdrawal or relayer's own balance)
+        const sendGasTx = await relayerSigner.sendTransaction({
+          to: voterAddress,
+          value: gasCostWei
+        });
+        await sendGasTx.wait();
+
+        setStatus(sponsoredFromPaymaster
+          ? `Gas sponsored from paymaster (${ethers.formatEther(gasCostWei)} ETH). Committing vote...`
+          : `Gas sponsored by relayer (${ethers.formatEther(gasCostWei)} ETH). Committing vote...`
+        );
+      } else {
+        // In production, voter pays their own gas (or a backend relayer API would sponsor)
+        setStatus('Committing secret vote...');
+      }
+
+      // Step 2: Voter commits (voter is msg.sender — required by SecretBallotManager)
+      const tx = await sendTxWithNonceRetry({
+        signer,
+        sendTx: (overrides = {}) => sbmContract[commitFn](pollId, commitHash, overrides),
+        onRetry: () => setStatus('Retrying commit...')
+      });
+      await tx.wait();
+
+      // Save salt and optionId for reveal
+      const saltKey = `${pollId}_${voterAddress}`;
+      setCommitSalt(prev => ({ ...prev, [saltKey]: salt }));
+      setRevealOptionId(prev => ({ ...prev, [saltKey]: optionId }));
+
+      setStatus(`✅ Gasless secret vote committed for poll #${pollId}! Gas was sponsored from the paymaster.`);
+      await loadPolls(addr);
+    } catch (err) {
+      setStatus(`Error: ${getContractErrorDetails(err).description}`);
+    }
+  }
 
   // ─── Gasless Voting (EIP-712 Meta-Transaction) ────────────────────────────
   async function voteGasless(pollId, optionId) {
@@ -893,11 +1135,13 @@ export default function VoteList({ mode = 'production' }) {
       const poll = polls.find(p => p.id === pollId);
 
       let winner = null;
+      let tieResult = null;
       if (poll.revealed) {
         winner = await loadWinner(pollId);
+        tieResult = detectTie(options);
       }
 
-      setPolls(polls.map(p => p.id === pollId ? { ...p, options, winner } : p));
+      setPolls(polls.map(p => p.id === pollId ? { ...p, options, winner, tieResult } : p));
       setExpandedPoll(pollId);
     }
   }
@@ -1262,9 +1506,18 @@ export default function VoteList({ mode = 'production' }) {
                     <div className="poll-options">
                       <h5>Candidates</h5>
 
-                      {poll.revealed && poll.winner && (
+                      {poll.revealed && poll.tieResult && (
+                        <div className="winner-card is-tie">
+                          <strong>🤝 Tie!</strong> {poll.tieResult.candidates.length} candidates tied with {poll.tieResult.votes} vote{poll.tieResult.votes !== 1 ? 's' : ''} each:
+                          <div className="tie-candidates">
+                            {poll.tieResult.candidates.map(c => <span key={c.id} className="chip">{c.name}</span>)}
+                          </div>
+                        </div>
+                      )}
+
+                      {poll.revealed && poll.winner && !poll.tieResult && (
                         <div className="winner-card">
-                          <strong>Winner:</strong> {poll.winner.name} ({poll.winner.votes} votes)
+                          <strong>🏆 Winner:</strong> {poll.winner.name} ({poll.winner.votes} votes)
                         </div>
                       )}
 
@@ -1277,9 +1530,16 @@ export default function VoteList({ mode = 'production' }) {
                           {poll.options.map(option => (
                             <div key={option.id} className="option-row">
                               <div><strong>{option.name}</strong></div>
-                              <button className="btn" onClick={() => commitSecretVote(poll.id, option.id)}>
-                                Vote
-                              </button>
+                              <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+                                <button className="btn" onClick={() => commitSecretVote(poll.id, option.id)}>
+                                  Vote
+                                </button>
+                                {poll.tokenConfig?.allowGaslessVoting && poll.tokenConfig?.enabled && (
+                                  <button className="btn secondary" onClick={() => commitSecretVoteGasless(poll.id, option.id)}>
+                                    ⛽ Vote Gasless
+                                  </button>
+                                )}
+                              </div>
                             </div>
                           ))}
                         </>
@@ -1289,6 +1549,33 @@ export default function VoteList({ mode = 'production' }) {
                       {poll.isSecretBallot && (poll.hasCommitted || poll.hasVoted) && (
                         <div className="info-banner">
                           ✅ Your vote has been securely recorded. Results will be published by the administrator.
+                          {/* Show pending reveal status and manual reveal button */}
+                          {(() => {
+                            let salts = {};
+                            try { salts = JSON.parse(localStorage.getItem('__sb_salts') || '{}'); } catch {}
+                            const pendingKeys = Object.keys(salts).filter(k => k.startsWith(`${poll.id}_`));
+                            const hasPending = pendingKeys.length > 0;
+                            const isEnded = poll.ended;
+                            if (!hasPending) return null;
+                            return (
+                              <div style={{ marginTop: 8 }}>
+                                <div className="muted small">
+                                  {pendingKeys.length} vote(s) pending reveal.
+                                  {!isEnded && ' Votes will be auto-revealed after the poll ends.'}
+                                  {isEnded && ' Poll has ended — click below to reveal now.'}
+                                </div>
+                                {isEnded && (
+                                  <button
+                                    className="btn btn-sm"
+                                    style={{ marginTop: 6 }}
+                                    onClick={() => handleManualReveal(poll.id)}
+                                  >
+                                    Reveal Vote(s) Now
+                                  </button>
+                                )}
+                              </div>
+                            );
+                          })()}
                         </div>
                       )}
 

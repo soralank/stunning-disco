@@ -5,24 +5,28 @@ A decentralized election voting system built with React and Solidity smart contr
 ## Features
 
 - **Owner Controls**: Contract owner can create polls and assign administrators
-- **Admin Functions**:
-  - Create polls with custom duration
-   - Schedule poll start time
-  - Add candidates/options to polls
-  - Authorize voters (single or bulk)
-  - Reveal results after voting ends
-  - End polls permanently
+- **Admin/Franchisee Functions**:
+   - Create polls with custom duration, start time, and advanced options:
+      - Enable gasless voting (⛽ Vote Gasless button for voters)
+      - Set tokens-per-voter for token-weighted voting
+      - Enable secret ballot (commit-reveal)
+   - Add candidates/options to polls
+   - Authorize voters (single or bulk)
+   - Reveal results after voting ends (improved flow: instant feedback, retry if reveal phase is still active)
+   - End polls permanently
 - **Voter Features**:
-  - View authorized polls
-  - Cast one vote per poll
-  - View results after they are revealed
-  - See winner when results are revealed
+   - View authorized polls
+   - Cast one vote per poll (or weighted votes if enabled)
+   - Vote gaslessly if enabled
+   - Reveal secret ballot votes with instant feedback
+   - View results after they are revealed
+   - See winner or tie when results are revealed
 - **Trusted System**:
-  - Only authorized voters can vote
-  - One vote per person per poll
-  - Time-based voting periods
-  - Results hidden until revealed by admin
-  - Immutable on-chain voting records
+   - Only authorized voters can vote
+   - One vote per person per poll (or weighted by tokens)
+   - Time-based voting periods
+   - Results hidden until revealed by admin/franchisee
+   - Immutable on-chain voting records
 
 ## Prerequisites
 

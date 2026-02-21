@@ -121,6 +121,22 @@ export function getVotingPaymasterAt(address, signerOrProvider) {
 	return new ethers.Contract(address, VOTING_PAYMASTER_ABI, signerOrProvider || getProvider());
 }
 
+/**
+ * Deploy a new VotingPaymaster contract from the browser.
+ * @param {ethers.Signer} signer – the deployer (owner) signer
+ * @param {string} votingContract – ElectionsManager address
+ * @param {string} tokenManager – TokenManager address
+ * @param {string} admin – address that will administer this paymaster (franchisee)
+ * @returns {Promise<ethers.Contract>} the deployed contract (already waited for deployment)
+ */
+export async function deployVotingPaymaster(signer, votingContract, tokenManager, admin) {
+	const { bytecode } = await import('./votingPaymaster.bytecode.json');
+	const factory = new ethers.ContractFactory(VOTING_PAYMASTER_ABI, bytecode, signer);
+	const contract = await factory.deploy(votingContract, tokenManager, admin);
+	await contract.waitForDeployment();
+	return contract;
+}
+
 export function getSecretBallotManagerContract(signerOrProvider) {
 	const address = getEnvValue('REACT_APP_SECRET_BALLOT_MANAGER_ADDRESS', 'NEXT_PUBLIC_SECRET_BALLOT_MANAGER_ADDRESS');
 	if (!address) throw new Error('REACT_APP_SECRET_BALLOT_MANAGER_ADDRESS not set');

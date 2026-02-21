@@ -131,6 +131,7 @@ export default function ResultsList({ mode = 'production' }) {
           }
 
           let winner = null;
+          let tieResult = null;
           if (status.revealed) {
             try {
               const winnerResult = await contract.getWinner(i);
@@ -141,6 +142,14 @@ export default function ResultsList({ mode = 'production' }) {
               };
             } catch (err) {
               winner = null;
+            }
+            // Detect ties: multiple candidates with the same highest vote count
+            const maxVotes = Math.max(...options.map(o => o.votes ?? 0));
+            if (maxVotes > 0) {
+              const topCandidates = options.filter(o => (o.votes ?? 0) === maxVotes);
+              if (topCandidates.length > 1) {
+                tieResult = { isTie: true, votes: maxVotes, candidates: topCandidates };
+              }
             }
           }
 
@@ -153,6 +162,7 @@ export default function ResultsList({ mode = 'production' }) {
             totalVotes: status.revealed ? Number(await contract.getTotalVotes(i)) : null,
             options,
             winner,
+            tieResult,
             revealed: status.revealed,
             ended: status.ended,
             active: status.active,
@@ -299,7 +309,13 @@ export default function ResultsList({ mode = 'production' }) {
                         <td>{formatDateTime(poll.startTime)}</td>
                         <td>{formatDateTime(poll.endTime)}</td>
                         <td>{poll.revealed ? poll.totalVotes : '—'}</td>
-                        <td>{poll.revealed && poll.winner ? `${poll.winner.name} (${poll.winner.votes})` : '—'}</td>
+                        <td>
+                          {poll.revealed && poll.tieResult
+                            ? `🤝 Tie (${poll.tieResult.candidates.length}-way, ${poll.tieResult.votes} votes)`
+                            : poll.revealed && poll.winner
+                            ? `🏆 ${poll.winner.name} (${poll.winner.votes})`
+                            : '—'}
+                        </td>
                         <td>
                           <button className="btn btn-sm secondary" onClick={() => setExpandedResult(expandedResult === poll.id ? null : poll.id)}>
                             {expandedResult === poll.id ? 'Hide' : 'Details'}
@@ -324,6 +340,19 @@ export default function ResultsList({ mode = 'production' }) {
                             {poll.options.length > 0 && (
                               <div style={{ marginTop: '0.5rem' }}>
                                 <strong>Candidates</strong>
+                                {poll.revealed && poll.tieResult && (
+                                  <div className="winner-card is-tie" style={{ marginTop: '0.5rem' }}>
+                                    <strong>🤝 Tie!</strong> {poll.tieResult.candidates.length} candidates tied with {poll.tieResult.votes} vote{poll.tieResult.votes !== 1 ? 's' : ''} each:
+                                    <div className="tie-candidates">
+                                      {poll.tieResult.candidates.map(c => <span key={c.id} className="chip">{c.name}</span>)}
+                                    </div>
+                                  </div>
+                                )}
+                                {poll.revealed && poll.winner && !poll.tieResult && (
+                                  <div className="winner-card" style={{ marginTop: '0.5rem' }}>
+                                    <strong>🏆 Winner:</strong> {poll.winner.name} ({poll.winner.votes} votes)
+                                  </div>
+                                )}
                                 <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.5rem', marginTop: '0.25rem' }}>
                                   {poll.options.map(option => (
                                     <span key={option.id} className="chip">{option.name} {poll.revealed ? `(${option.votes})` : ''}</span>

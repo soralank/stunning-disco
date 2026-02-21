@@ -1,5 +1,10 @@
 # Testing Guide - Local vs Production Mode
 
+## What's New
+
+- **Advanced Poll Options:** When creating a poll, you can now enable gasless voting (⛽ Vote Gasless), set tokens-per-voter for token-weighted voting, and enable secret ballot (commit-reveal) mode.
+- **Improved Reveal Flow:** Revealing secret ballot votes now gives instant feedback—if the reveal phase is still active, just retry after it ends (no more waiting loop).
+
 The voting system now has **two separate modes** via routing:
 
 ## 🔵 Local Testing Mode (No MetaMask needed!)

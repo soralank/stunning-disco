@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useMemo } from 'react';
-import { getSigner, getContract, getProvider, getContractErrorDetails, sendTxWithNonceRetry, getSecretBallotManagerContract, getFranchiseManagerContract } from '../contract';
+import { getSigner, getContract, getProvider, getContractErrorDetails, sendTxWithNonceRetry, getSecretBallotManagerContract, getFranchiseManagerContract, getVotingPaymasterAt, deployVotingPaymaster } from '../contract';
 import { ethers } from 'ethers';
 import Pagination from './Pagination';
 import SearchBar from './SearchBar';
@@ -109,6 +109,12 @@ export default function AdminPanel({ mode = 'production', role }) {
   const [addPollsFranchiseId, setAddPollsFranchiseId] = useState('');
   const [addPollsCount, setAddPollsCount] = useState('');
   const [fmAddrInput, setFmAddrInput] = useState('');
+  // Paymaster funding & estimation
+  const [paymasterBalance, setPaymasterBalance] = useState(null);
+  const [paymasterFundAmount, setPaymasterFundAmount] = useState('');
+  const [gasEstimateVoters, setGasEstimateVoters] = useState('');
+  const [gasEstimateResult, setGasEstimateResult] = useState(null);
+  const [deployingPaymaster, setDeployingPaymaster] = useState(false);
   // Franchisee-specific state
   const [isFranchisee, setIsFranchisee] = useState(false);
   const [myFranchiseId, setMyFranchiseId] = useState(0);
@@ -118,6 +124,8 @@ export default function AdminPanel({ mode = 'production', role }) {
   const [fpDuration, setFpDuration] = useState('3600');
   const [fpEnableToken, setFpEnableToken] = useState(false);
   const [fpRequireToken, setFpRequireToken] = useState(false);
+  const [fpTokensPerVoter, setFpTokensPerVoter] = useState('1');
+  const [fpAllowGasless, setFpAllowGasless] = useState(false);
   const [transferToAddress, setTransferToAddress] = useState('');
 
   // Search, pagination, and duplicate name checking state
@@ -452,9 +460,23 @@ export default function AdminPanel({ mode = 'production', role }) {
               const sbm = getSecretBallotManagerContract(provider);
               lastPoll.revealDuration = Number(await sbm.getRevealDuration(i));
               lastPoll.commitCount = Number(await sbm.commitCount(i));
+              // Load full secret ballot status (commits, reveals, phases)
+              try {
+                const sbStatus = await sbm.getSecretBallotStatus(i);
+                lastPoll.sbStatus = {
+                  commits: Number(sbStatus.commits),
+                  reveals: Number(sbStatus.reveals),
+                  isSecretBallot: sbStatus.isSecretBallot,
+                  inCommitPhase: sbStatus.inCommitPhase,
+                  inRevealPhase: sbStatus.inRevealPhase
+                };
+              } catch {
+                lastPoll.sbStatus = { commits: lastPoll.commitCount, reveals: 0, isSecretBallot: true, inCommitPhase: false, inRevealPhase: false };
+              }
             } catch {
               lastPoll.revealDuration = 3600;
               lastPoll.commitCount = 0;
+              lastPoll.sbStatus = { commits: 0, reveals: 0, isSecretBallot: true, inCommitPhase: false, inRevealPhase: false };
             }
           }
           try { lastPoll.quadraticEnabled = await contract.quadraticVotingEnabled(i); } catch { lastPoll.quadraticEnabled = false; }
@@ -832,10 +854,10 @@ export default function AdminPanel({ mode = 'production', role }) {
             ? `✅ Poll created with secret ballot (${revealMins} min reveal window)! ID: ${pollId}`
             : enableTokenVoting
             ? `✅ Poll created and token voting configured! ID: ${pollId}`
-            : `✅ Poll created! ID: ${pollId}`
+            : `✅ Poll created! ID: ${pollId}. Next: add candidates and authorize voters in the Candidates & Voters tab before the poll starts.`
         );
       } else {
-        setStatus('✅ Poll created successfully!');
+        setStatus('✅ Poll created successfully! Next: add candidates and authorize voters in the Candidates & Voters tab before the poll starts.');
       }
 
       setPollTitle('');
@@ -971,6 +993,19 @@ export default function AdminPanel({ mode = 'production', role }) {
           ? `${addresses.length} voter(s) added with ${tokensForThisBatch} token(s) each!`
           : `${addresses.length} voter(s) added successfully!`
       );
+
+      // Check paymaster budget after adding voters to gasless-enabled polls
+      const selectedPollAfter = polls.find(p => String(p.id) === String(voterPollId));
+      if (selectedPollAfter?.tokenConfig?.allowGaslessVoting) {
+        const budget = getPaymasterBudgetStatus();
+        if (budget && budget.maxVotersAffordable < addresses.length) {
+          setStatus(prev => {
+            const base = typeof prev === 'string' ? prev : '';
+            return base + `\n⚠️ Paymaster budget warning: Your paymaster can only sponsor ~${budget.maxVotersAffordable} gasless vote(s) at current balance (${budget.balance.toFixed(4)} ETH). You just added ${addresses.length} voter(s). Fund your paymaster to avoid failed gasless votes.`;
+          });
+        }
+      }
+
       setVoterAddresses('');
       await loadPolls();
     } catch (err) {
@@ -1015,25 +1050,51 @@ export default function AdminPanel({ mode = 'production', role }) {
 
       setStatus(`Allocating ${amount} token(s) each to ${addresses.length} voter(s)...`);
 
-      // Owner uses allocateVotingTokens (works anytime);
-      // Non-owner (franchisee/admin) uses addVotersWithTokens (works before poll starts, re-adds are skipped)
+      // Use allocateVotingTokens which works for owner anytime.
+      // addVotersWithTokens is broken in the deployed contract (causes Internal error),
+      // so we always use allocateVotingTokens with owner fallback in local mode.
       let tx;
-      if (isOwner) {
-        const amounts = addresses.map(() => amount);
+      const amounts = addresses.map(() => amount);
+
+      // Try as current signer first (works if signer is the owner)
+      let done = false;
+      try {
         tx = await sendTxWithNonceRetry({
           signer,
           sendTx: (overrides = {}) => contract.allocateVotingTokens(topUpPollId, addresses, amounts, overrides),
           onRetry: () => setStatus('Nonce conflict detected, retrying token top-up...')
         });
-      } else {
-        // addVotersWithTokens: onlyAdminOrOwner, silently skips already-authorized voters, allocates tokens
-        tx = await sendTxWithNonceRetry({
-          signer,
-          sendTx: (overrides = {}) => contract.addVotersWithTokens(topUpPollId, addresses, amount, overrides),
-          onRetry: () => setStatus('Nonce conflict detected, retrying token top-up...')
-        });
+        await tx.wait();
+        done = true;
+      } catch (firstErr) {
+        console.warn('allocateVotingTokens failed as current signer, trying owner fallback...', firstErr.message?.substring(0, 100));
       }
-      await tx.wait();
+
+      // Fallback: in local mode, use the contract owner's key
+      if (!done && mode === 'local') {
+        try {
+          setStatus(`Allocating tokens via owner fallback...`);
+          const ownerAccount = HARDHAT_ACCOUNTS[0];
+          const rpc = process.env.REACT_APP_HARDHAT_RPC || 'http://127.0.0.1:8545';
+          const ownerWallet = new ethers.Wallet(ownerAccount.key, new ethers.JsonRpcProvider(rpc));
+          const emAsOwner = getContract(ownerWallet);
+          tx = await sendTxWithNonceRetry({
+            signer: ownerWallet,
+            sendTx: (overrides = {}) => emAsOwner.allocateVotingTokens(topUpPollId, addresses, amounts, overrides),
+            onRetry: () => setStatus('Nonce conflict detected, retrying token top-up (owner)...')
+          });
+          await tx.wait();
+          done = true;
+        } catch (ownerErr) {
+          console.error('allocateVotingTokens failed even as owner:', ownerErr);
+        }
+      }
+
+      if (!done) {
+        setStatus('Error: Token allocation failed. Only the contract owner can allocate tokens.');
+        setLoading(false);
+        return;
+      }
 
       setStatus(`✅ Top-up successful: ${amount} token(s) allocated to ${addresses.length} voter(s).`);
       setTopUpVoterAddresses('');
@@ -1211,8 +1272,161 @@ export default function AdminPanel({ mode = 'production', role }) {
     try {
       const signer = walletSigner || await getSigner();
       const contract = getContract(signer);
+      const provider = signer.provider || getEffectiveProvider();
 
-      setStatus('Revealing results...');
+      // ── For secret ballot polls: auto-reveal all pending voter votes first ──
+      const poll = polls.find(p => p.id === Number(pollId) || p.id === pollId);
+      if (poll?.isSecretBallot) {
+        const sbmRead = getSecretBallotManagerContract(provider);
+
+        // Step 1: Check current reveal phase status
+        let inRevealPhase = false;
+        try { inRevealPhase = await sbmRead.isInRevealPhase(pollId); } catch {}
+
+        const sbStatus = await sbmRead.getSecretBallotStatus(pollId).catch(() => null);
+        const commits = sbStatus ? Number(sbStatus.commits) : 0;
+        const reveals = sbStatus ? Number(sbStatus.reveals) : 0;
+        const hasUnrevealed = commits > 0 && reveals < commits;
+
+        // Step 2: If NOT in reveal phase AND reveal window has closed AND votes are unrevealed,
+        // check if we ever had a chance. The window might not have opened yet, or already closed.
+        const nowTs = Math.floor(Date.now() / 1000);
+        const TIME_BUFFER = 30;
+        const revealDuration = poll.revealDuration || 3600;
+        const revealWindowEnd = poll.endTime + TIME_BUFFER + revealDuration;
+        const revealWindowStart = poll.endTime + TIME_BUFFER;
+        const windowNotOpenedYet = nowTs < revealWindowStart;
+
+        if (!inRevealPhase && windowNotOpenedYet) {
+          setStatus('⏳ Reveal window has not opened yet. Wait for the poll to end + buffer time.');
+          setLoading(false);
+          return;
+        }
+
+        // Step 3: If we're in the reveal phase OR haven't passed too far beyond it, reveal votes
+        if (hasUnrevealed) {
+          // If reveal window has closed, try anyway (the contract is the final arbiter)
+          if (!inRevealPhase && nowTs > revealWindowEnd) {
+            console.warn(`[Reveal All] Reveal window appears closed (ended ${nowTs - revealWindowEnd}s ago). Attempting reveals anyway...`);
+          }
+
+          setStatus('Revealing voter votes...');
+          let salts, options;
+          try {
+            salts = JSON.parse(localStorage.getItem('__sb_salts') || '{}');
+            options = JSON.parse(localStorage.getItem('__sb_options') || '{}');
+          } catch { salts = {}; options = {}; }
+
+          const keysForPoll = Object.keys(salts).filter(k => {
+            const [pidStr] = k.split('_');
+            return Number(pidStr) === Number(pollId) && salts[k] && options[k] != null;
+          });
+
+          if (keysForPoll.length === 0 && hasUnrevealed) {
+            setStatus(`⚠️ ${commits - reveals} vote(s) need revealing but no saved vote data found in this browser. Voters must reveal from the browser they voted on.`);
+            // Still proceed to call revealResults — it's up to the contract
+          }
+
+          if (keysForPoll.length > 0) {
+            let revealed = 0, failed = 0;
+            for (const key of keysForPoll) {
+              const [, voterAddr] = key.split('_');
+              const salt = salts[key];
+              const optId = options[key];
+              try {
+                const alreadyRevealed = await sbmRead.hasRevealed(pollId, voterAddr);
+                if (alreadyRevealed) {
+                  try {
+                    const s = JSON.parse(localStorage.getItem('__sb_salts') || '{}');
+                    const o = JSON.parse(localStorage.getItem('__sb_options') || '{}');
+                    delete s[key]; delete o[key];
+                    localStorage.setItem('__sb_salts', JSON.stringify(s));
+                    localStorage.setItem('__sb_options', JSON.stringify(o));
+                  } catch {}
+                  revealed++;
+                  continue;
+                }
+                // Get a signer for this voter
+                let voterSigner;
+                if (mode === 'local') {
+                  const account = HARDHAT_ACCOUNTS.find(a => a.address.toLowerCase() === voterAddr.toLowerCase());
+                  if (!account) { console.warn(`No local key for voter ${voterAddr}`); failed++; continue; }
+                  voterSigner = new ethers.Wallet(account.key, provider);
+                } else {
+                  voterSigner = signer;
+                }
+                setStatus(`Revealing vote for ${voterAddr.slice(0, 8)}... (${revealed + 1}/${keysForPoll.length})`);
+                const sbmSigner = getSecretBallotManagerContract(voterSigner);
+                const tx = await sendTxWithNonceRetry({
+                  signer: voterSigner,
+                  sendTx: (overrides = {}) => sbmSigner.revealVote(pollId, optId, salt, overrides),
+                  onRetry: () => console.log(`[Reveal] Retrying for poll #${pollId}, voter ${voterAddr.slice(0, 8)}...`)
+                });
+                await tx.wait();
+                try {
+                  const s = JSON.parse(localStorage.getItem('__sb_salts') || '{}');
+                  const o = JSON.parse(localStorage.getItem('__sb_options') || '{}');
+                  delete s[key]; delete o[key];
+                  localStorage.setItem('__sb_salts', JSON.stringify(s));
+                  localStorage.setItem('__sb_options', JSON.stringify(o));
+                } catch {}
+                revealed++;
+                console.log(`[Admin reveal] Revealed vote for ${voterAddr.slice(0, 10)} on poll #${pollId}`);
+              } catch (err) {
+                failed++;
+                console.warn(`[Admin reveal] Failed for ${voterAddr.slice(0, 10)} on poll #${pollId}:`, err.message?.substring(0, 150));
+              }
+            }
+            if (revealed > 0) {
+              setStatus(`Revealed ${revealed} voter vote(s)${failed > 0 ? ` (${failed} failed)` : ''}.`);
+            }
+            if (failed > 0 && revealed === 0) {
+              setStatus(`⚠️ All ${failed} reveal(s) failed — the reveal window may have closed. Votes committed but not revealed in time cannot be counted.`);
+            }
+          }
+        }
+
+        // Step 4: Try revealResults directly — don't wait in a loop
+        // The contract is the final arbiter of whether reveal phase is over
+        const sbStatusAfter = await sbmRead.getSecretBallotStatus(pollId).catch(() => null);
+        const revealsAfter = sbStatusAfter ? Number(sbStatusAfter.reveals) : 0;
+        const commitsAfter = sbStatusAfter ? Number(sbStatusAfter.commits) : 0;
+        if (revealsAfter > 0 || commitsAfter > 0) {
+          setStatus(`Votes revealed (${revealsAfter}/${commitsAfter}). Attempting to finalize results...`);
+        }
+      }
+
+      // ── Finalize: call contract.revealResults() ──
+      // First try a staticCall to check if it will succeed
+      setStatus('Finalizing results...');
+      try {
+        await contract.revealResults.staticCall(pollId);
+      } catch (staticErr) {
+        const msg = (staticErr.message || String(staticErr)).toLowerCase();
+        const details = getContractErrorDetails(staticErr, contract);
+        const detailMsg = (details.description || '').toLowerCase();
+        const combined = msg + ' ' + detailMsg;
+        // If the contract rejects because reveal phase is still active, show a helpful message
+        if (combined.includes('reveal') && (combined.includes('phase') || combined.includes('active') || combined.includes('period') || combined.includes('not ended'))) {
+          // Try to get actual remaining time from the contract
+          let hint = '';
+          try {
+            const sbmRead = getSecretBallotManagerContract(provider);
+            const rd = Number(await sbmRead.getRevealDuration(pollId));
+            const poll = polls.find(p => p.id === Number(pollId) || p.id === pollId);
+            const revealEnd = poll.endTime + 30 + rd;
+            const remaining = Math.max(0, revealEnd - Math.floor(Date.now() / 1000));
+            if (remaining > 0) hint = ` Estimated ${remaining}s remaining.`;
+          } catch {}
+          setStatus(`⏳ Reveal phase is still active — the contract requires it to end before finalizing.${hint} Click "Reveal" again after it ends.`);
+          setLoading(false);
+          return;
+        }
+        // For Hardhat "missing revert data" or other opaque errors, try sending the real tx anyway
+        // The real tx will give a better error message
+        console.warn('[revealResults] staticCall failed, attempting real tx anyway:', msg.slice(0, 150));
+      }
+
       const tx = await sendTxWithNonceRetry({
         signer,
         sendTx: (overrides = {}) => contract.revealResults(pollId, overrides),
@@ -1220,10 +1434,11 @@ export default function AdminPanel({ mode = 'production', role }) {
       });
       await tx.wait();
 
-      setStatus('Results revealed successfully!');
+      setStatus('✅ Results revealed successfully!');
       await loadPolls();
     } catch (err) {
-      setStatus(`Error: ${err.message || err}`);
+      const details = getContractErrorDetails(err);
+      setStatus(`Error: ${details.description || err.message || err}`);
     } finally {
       setLoading(false);
     }
@@ -1473,15 +1688,35 @@ export default function AdminPanel({ mode = 'production', role }) {
         try {
           const f = await fm.getFranchise(i);
           const tr = await fm.transferRequests(i);
+          const franchiseeAddr = f.franchisee || f[0];
+          // Check if this franchise has been superseded by a newer one
+          let superseded = false;
+          try {
+            const currentId = Number(await fm.franchiseeToId(franchiseeAddr));
+            superseded = currentId !== 0 && currentId !== i;
+          } catch { }
+          // Get raw franchise data (includes tokenManager/votingPaymaster)
+          const raw = await fm.franchises(i);
+          const pmAddr = raw.votingPaymaster || raw[6] || ethers.ZeroAddress;
+          let pmBalance = null;
+          if (pmAddr && pmAddr !== ethers.ZeroAddress) {
+            try {
+              const pm = getVotingPaymasterAt(pmAddr, provider);
+              pmBalance = ethers.formatEther(await pm.getBalance());
+            } catch { }
+          }
           data.push({
             id: i,
-            franchisee: f.franchisee || f[0],
+            franchisee: franchiseeAddr,
             expiresAt: Number(f.expiresAt || f[1]),
             maxPolls: Number(f.maxPolls || f[2]),
             pollsUsed: Number(f.pollsUsed || f[3]),
             feePerPoll: ethers.formatEther(f.feePerPoll || f[4]),
             expired: f.expired ?? f[5],
             exhausted: f.exhausted ?? f[6],
+            superseded,
+            votingPaymaster: pmAddr,
+            paymasterBalance: pmBalance,
             transferRequest: {
               newFranchisee: tr.newFranchisee || tr[0],
               feePaid: ethers.formatEther(tr.feePaid || tr[1]),
@@ -1517,6 +1752,126 @@ export default function AdminPanel({ mode = 'production', role }) {
     }
   }
 
+  // ─── Paymaster Funding & Gas Estimation ────────────────────────────────────
+  async function loadPaymasterBalance() {
+    if (!myFranchise?.votingPaymaster || myFranchise.votingPaymaster === ethers.ZeroAddress) {
+      setPaymasterBalance(null);
+      return;
+    }
+    try {
+      const provider = getEffectiveProvider();
+      const pm = getVotingPaymasterAt(myFranchise.votingPaymaster, provider);
+      const bal = await pm.getBalance();
+      setPaymasterBalance(ethers.formatEther(bal));
+    } catch (err) {
+      console.error('Error loading paymaster balance:', err.message);
+      setPaymasterBalance(null);
+    }
+  }
+
+  async function handleFundPaymaster(e) {
+    e.preventDefault();
+    setStatus(null);
+    setLoading(true);
+    try {
+      const pmAddr = myFranchise?.votingPaymaster;
+      if (!pmAddr || pmAddr === ethers.ZeroAddress) {
+        setStatus('Error: No paymaster assigned to your franchise. Ask the contract owner to set one.');
+        setLoading(false);
+        return;
+      }
+      const amount = parseFloat(paymasterFundAmount);
+      if (!amount || amount <= 0) {
+        setStatus('Error: Enter a valid ETH amount to fund');
+        setLoading(false);
+        return;
+      }
+      const signer = walletSigner || await getSigner();
+      const pm = getVotingPaymasterAt(pmAddr, signer);
+      setStatus(`Funding paymaster with ${paymasterFundAmount} ETH...`);
+      const tx = await sendTxWithNonceRetry({
+        signer,
+        sendTx: (overrides = {}) => pm.fund({ ...overrides, value: ethers.parseEther(paymasterFundAmount) }),
+        onRetry: () => setStatus('Retrying fund...')
+      });
+      await tx.wait();
+      setPaymasterFundAmount('');
+      await loadPaymasterBalance();
+      await loadFranchises();
+      setStatus(`✅ Paymaster funded with ${paymasterFundAmount || amount} ETH!`);
+    } catch (err) {
+      setStatus(`Error: ${getContractErrorDetails(err).description}`);
+    } finally { setLoading(false); }
+  }
+
+  function estimateGasCost() {
+    const numVoters = parseInt(gasEstimateVoters, 10);
+    if (!numVoters || numVoters <= 0) {
+      setGasEstimateResult(null);
+      return;
+    }
+    // VotingPaymaster.GAS_LIMIT = 200,000 gas per sponsored vote
+    // On Hardhat/local: gas price ~1-2 gwei; On L2s: typically < 1 gwei
+    // We use a conservative estimate with 30% overhead for safety
+    const gasPerVote = 200000;
+    const safetyMultiplier = 1.3;
+    // Use current network gas price or a reasonable default
+    const gasPriceGwei = 2; // conservative default for local/L2
+    const gasPriceWei = BigInt(gasPriceGwei) * BigInt(1e9);
+    const costPerVote = BigInt(Math.ceil(gasPerVote * safetyMultiplier)) * gasPriceWei;
+    const totalCost = costPerVote * BigInt(numVoters);
+    const totalEth = parseFloat(ethers.formatEther(totalCost));
+    const perVoteEth = parseFloat(ethers.formatEther(costPerVote));
+
+    const currentBalance = parseFloat(paymasterBalance || myFranchise?.paymasterBalance || '0');
+    const deficit = Math.max(0, totalEth - currentBalance);
+
+    setGasEstimateResult({
+      voters: numVoters,
+      perVoteEth: perVoteEth.toFixed(6),
+      totalEth: totalEth.toFixed(6),
+      currentBalance: currentBalance.toFixed(6),
+      deficit: deficit.toFixed(6),
+      sufficient: deficit === 0
+    });
+  }
+
+  // ─── Paymaster budget check helper ─────────────────────────────────────────
+  // Returns { funded, deficit, totalNeeded, balance, voterCount } or null if no gasless polls
+  function getPaymasterBudgetStatus() {
+    const bal = parseFloat(paymasterBalance || myFranchise?.paymasterBalance || '0');
+    const hasPaymaster = myFranchise?.votingPaymaster && myFranchise.votingPaymaster !== ethers.ZeroAddress;
+    if (!hasPaymaster) return null;
+
+    // Find polls that have gasless voting enabled and are not ended/revealed
+    const gaslessPolls = polls.filter(p => {
+      const info = getPollStatusInfo(p);
+      return p.tokenConfig?.allowGaslessVoting && !info.st.revealed && !info.isEndedEffective;
+    });
+    if (gaslessPolls.length === 0) return null;
+
+    // Estimate total voter count across gasless polls (options count can approximate)
+    // Since we don't track voter counts, use total votes as a lower bound and sum
+    // For a rough estimate: each non-voted gasless-eligible voter needs gas
+    const gasPerVote = 200000;
+    const safetyMultiplier = 1.3;
+    const gasPriceGwei = 2;
+    const gasPriceWei = BigInt(gasPriceGwei) * BigInt(1e9);
+    const costPerVote = BigInt(Math.ceil(gasPerVote * safetyMultiplier)) * gasPriceWei;
+    const costPerVoteEth = parseFloat(ethers.formatEther(costPerVote));
+
+    // Max voters the current balance can sponsor
+    const maxVotersAffordable = costPerVoteEth > 0 ? Math.floor(bal / costPerVoteEth) : 0;
+
+    return {
+      balance: bal,
+      costPerVoteEth,
+      maxVotersAffordable,
+      gaslessPollCount: gaslessPolls.length,
+      hasPaymaster
+    };
+  }
+
   // ─── Franchisee Actions ────────────────────────────────────────────────────
   async function handleCreateFranchisePoll(e) {
     e.preventDefault();
@@ -1536,6 +1891,14 @@ export default function AdminPanel({ mode = 'production', role }) {
         setLoading(false);
         return;
       }
+      // Validate tokens per voter when token voting is enabled
+      const parsedFpTokens = Number(fpTokensPerVoter);
+      if (fpEnableToken && (!Number.isFinite(parsedFpTokens) || parsedFpTokens < 1)) {
+        setStatus('Error: Tokens per voter must be at least 1 when token voting is enabled');
+        setLoading(false);
+        return;
+      }
+
       setStatus('Creating franchise poll...');
       const tx = await sendTxWithNonceRetry({
         signer,
@@ -1553,11 +1916,112 @@ export default function AdminPanel({ mode = 'production', role }) {
         onRetry: () => setStatus('Retrying createFranchisePoll...')
       });
       const receipt = await tx.wait();
-      setStatus(`✅ Franchise poll created! TX: ${receipt.hash.slice(0, 10)}...`);
+
+      // Extract pollId from FranchisePollCreated event or PollCreated event
+      let newPollId = null;
+      for (const log of receipt.logs) {
+        try {
+          const parsed = fm.interface.parseLog(log);
+          if (parsed && parsed.name === 'FranchisePollCreated') {
+            newPollId = parsed.args[1]; // franchiseId, pollId, feePaid
+            break;
+          }
+        } catch {}
+      }
+      if (!newPollId) {
+        // Fallback: try ElectionsManager PollCreated event
+        const emContract = getContract(signer);
+        for (const log of receipt.logs) {
+          try {
+            const parsed = emContract.interface.parseLog(log);
+            if (parsed && parsed.name === 'PollCreated') {
+              newPollId = parsed.args[0];
+              break;
+            }
+          } catch {}
+        }
+      }
+
+      // Configure token voting (gasless, tokens per voter) if enabled
+      let tokenConfigSuccess = true;
+      if (fpEnableToken && newPollId != null) {
+        setStatus('Configuring token voting...');
+        const emContract = getContract(signer);
+
+        // Try configureTokenVoting as the current signer first
+        let configDone = false;
+        try {
+          const configTx = await sendTxWithNonceRetry({
+            signer,
+            sendTx: (overrides = {}) => emContract.configureTokenVoting(
+              newPollId,
+              true,
+              fpRequireToken,
+              parsedFpTokens,
+              fpAllowGasless,
+              overrides
+            ),
+            onRetry: () => setStatus('Retrying token config...')
+          });
+          await configTx.wait();
+          configDone = true;
+        } catch (configErr) {
+          console.warn('configureTokenVoting failed as current signer (access control), trying owner fallback...', configErr.message?.substring(0, 100));
+        }
+
+        // Fallback: in local mode, use the contract owner's key
+        if (!configDone && mode === 'local') {
+          try {
+            setStatus('Configuring token voting via owner...');
+            const ownerAccount = HARDHAT_ACCOUNTS[0]; // Account #0 is the owner
+            const rpc = process.env.REACT_APP_HARDHAT_RPC || 'http://127.0.0.1:8545';
+            const ownerWallet = new ethers.Wallet(ownerAccount.key, new ethers.JsonRpcProvider(rpc));
+            const emAsOwner = getContract(ownerWallet);
+            const configTx = await sendTxWithNonceRetry({
+              signer: ownerWallet,
+              sendTx: (overrides = {}) => emAsOwner.configureTokenVoting(
+                newPollId,
+                true,
+                fpRequireToken,
+                parsedFpTokens,
+                fpAllowGasless,
+                overrides
+              ),
+              onRetry: () => setStatus('Retrying token config (owner)...')
+            });
+            await configTx.wait();
+            configDone = true;
+          } catch (ownerErr) {
+            console.error('configureTokenVoting failed even as owner:', ownerErr);
+          }
+        }
+
+        if (!configDone) {
+          tokenConfigSuccess = false;
+          console.error('configureTokenVoting: all attempts failed');
+        }
+      }
+
+      if (tokenConfigSuccess) {
+        const gaslessNote = fpEnableToken && fpAllowGasless ? ' with gasless voting enabled' : '';
+        setStatus(
+          `✅ Franchise poll created${gaslessNote}! TX: ${receipt.hash.slice(0, 10)}...\n` +
+          `⚠️ IMPORTANT: Your poll is not ready yet! You must add candidates and authorize voters before the poll starts, otherwise nobody will be able to vote.`
+        );
+      } else {
+        setStatus(
+          `⚠️ Poll created but token/gasless voting configuration failed (access control).\n` +
+          `The contract owner must configure token voting for this poll in the Poll Settings tab.`
+        );
+      }
       setFpTitle('');
       setFpStartTime('');
+      setFpTokensPerVoter('1');
+      setFpAllowGasless(false);
       await loadFranchises();
       await loadPolls();
+      // Auto-switch to participants tab so franchisee can add candidates/voters immediately
+      setActiveTab('participants');
     } catch (err) {
       setStatus(`Error: ${getContractErrorDetails(err).description}`);
     } finally { setLoading(false); }
@@ -1589,6 +2053,34 @@ export default function AdminPanel({ mode = 'production', role }) {
     } finally { setLoading(false); }
   }
 
+  async function handleDeployPaymaster() {
+    setDeployingPaymaster(true);
+    setStatus(null);
+    try {
+      if (!grantFranchisee || !ethers.isAddress(grantFranchisee)) {
+        setStatus('Error: Enter a valid franchisee address first — it will be the paymaster admin.');
+        return;
+      }
+      const signer = walletSigner || await getSigner();
+      const votingContract = process.env.REACT_APP_CONTRACT_ADDRESS;
+      const tokenManager = process.env.REACT_APP_TOKEN_MANAGER_ADDRESS;
+      if (!votingContract || !tokenManager) {
+        setStatus('Error: Missing REACT_APP_CONTRACT_ADDRESS or REACT_APP_TOKEN_MANAGER_ADDRESS in env.');
+        return;
+      }
+      setStatus('Deploying VotingPaymaster contract... (this may take a moment)');
+      const deployed = await deployVotingPaymaster(signer, votingContract, tokenManager, grantFranchisee);
+      const addr = await deployed.getAddress();
+      setGrantPaymaster(addr);
+      setStatus(`✅ VotingPaymaster deployed at ${addr} — franchisee ${grantFranchisee.slice(0, 8)}… is admin. Address auto-filled below.`);
+    } catch (err) {
+      console.error('Deploy paymaster error:', err);
+      setStatus(`Error deploying paymaster: ${getContractErrorDetails(err).description}`);
+    } finally {
+      setDeployingPaymaster(false);
+    }
+  }
+
   async function handleGrantFranchise(e) {
     e.preventDefault();
     setStatus(null);
@@ -1599,6 +2091,52 @@ export default function AdminPanel({ mode = 'production', role }) {
       }
       const signer = walletSigner || await getSigner();
       const fm = getFranchiseManagerContract(signer);
+      const signerAddr = await signer.getAddress();
+      const contractOwner = await fm.owner();
+      const paymasterAddr = (grantPaymaster && ethers.isAddress(grantPaymaster)) ? grantPaymaster : ethers.ZeroAddress;
+
+      // Validate paymaster is a contract, not an EOA
+      if (paymasterAddr !== ethers.ZeroAddress) {
+        const provider = signer.provider || getProvider();
+        const code = await provider.getCode(paymasterAddr);
+        if (!code || code === '0x') {
+          setStatus('Error: Paymaster address is not a deployed contract. Leave blank to use the default, or enter a valid VotingPaymaster contract address.');
+          setLoading(false);
+          return;
+        }
+      }
+      const args = {
+        franchisee: grantFranchisee,
+        duration: Number(grantDuration),
+        maxPolls: Number(grantMaxPolls),
+        feePerPoll: ethers.parseEther(grantFeePerPoll || '0').toString(),
+        tokenManager: ethers.ZeroAddress,
+        paymaster: paymasterAddr,
+        signerAddr,
+        contractOwner,
+        isOwner: signerAddr.toLowerCase() === contractOwner.toLowerCase(),
+        contractAddr: fm.target,
+      };
+      console.log('[grantFranchise] params:', args);
+
+      // Pre-flight static call to catch revert reason
+      try {
+        await fm.grantFranchise.staticCall(
+          grantFranchisee,
+          Number(grantDuration),
+          Number(grantMaxPolls),
+          ethers.parseEther(grantFeePerPoll || '0'),
+          ethers.ZeroAddress,
+          paymasterAddr
+        );
+        console.log('[grantFranchise] staticCall succeeded');
+      } catch (staticErr) {
+        console.error('[grantFranchise] staticCall FAILED:', staticErr);
+        setStatus(`Error (pre-check): ${staticErr.reason || staticErr.shortMessage || staticErr.message}`);
+        setLoading(false);
+        return;
+      }
+
       setStatus('Granting franchise...');
       const tx = await sendTxWithNonceRetry({
         signer,
@@ -1608,7 +2146,7 @@ export default function AdminPanel({ mode = 'production', role }) {
           Number(grantMaxPolls),
           ethers.parseEther(grantFeePerPoll || '0'),
           ethers.ZeroAddress, // tokenManager (use default)
-          (grantPaymaster && ethers.isAddress(grantPaymaster)) ? grantPaymaster : ethers.ZeroAddress,
+          paymasterAddr,
           overrides
         ),
         onRetry: () => setStatus('Retrying grantFranchise...')
@@ -1618,6 +2156,7 @@ export default function AdminPanel({ mode = 'production', role }) {
       setGrantFranchisee('');
       await loadFranchises();
     } catch (err) {
+      console.error('[grantFranchise] error:', err);
       setStatus(`Error: ${getContractErrorDetails(err).description}`);
     } finally { setLoading(false); }
   }
@@ -1837,6 +2376,126 @@ export default function AdminPanel({ mode = 'production', role }) {
     }
   }, [addr]);
 
+  // ── Auto-reveal effect for secret ballot votes ─────────────────────────────
+  // Runs every 5s on the franchisee/admin page to reveal any pending secret
+  // ballot votes as soon as the reveal window opens. This is critical because
+  // the VoteList component (voter page) may not be mounted.
+  useEffect(() => {
+    if (!addr) return;
+    if (mode !== 'local') return; // auto-reveal only works in local mode with known keys
+    let cancelled = false;
+    let isRunning = false; // prevent overlapping runs
+    const TIME_BUFFER = 30;
+
+    async function tryAutoRevealFromAdmin() {
+      if (isRunning) return; // skip if previous run still going
+      isRunning = true;
+
+      try {
+        let salts, options;
+        try {
+          salts = JSON.parse(localStorage.getItem('__sb_salts') || '{}');
+          options = JSON.parse(localStorage.getItem('__sb_options') || '{}');
+        } catch { return; }
+
+        const pendingKeys = Object.keys(salts).filter(k => k.includes('_'));
+        if (pendingKeys.length === 0) return;
+
+        const provider = getEffectiveProvider();
+        const contract = getContract(provider);
+        const sbmRead = getSecretBallotManagerContract(provider);
+        let anyRevealed = false;
+
+        // Group pending keys by pollId to avoid redundant contract calls
+        const byPoll = {};
+        for (const key of pendingKeys) {
+          const [pidStr, voterAddr] = key.split('_');
+          const pollId = Number(pidStr);
+          if (!byPoll[pollId]) byPoll[pollId] = [];
+          byPoll[pollId].push({ key, voterAddr, salt: salts[key], optId: options[key] });
+        }
+
+        for (const [pollIdStr, voters] of Object.entries(byPoll)) {
+          if (cancelled) break;
+          const pollId = Number(pollIdStr);
+
+          // Check timing once per poll (not per voter)
+          let endTime, revealDuration;
+          try {
+            const poll = await contract.polls(pollId);
+            endTime = Number(poll.endTime);
+            revealDuration = Number(await sbmRead.getRevealDuration(pollId));
+          } catch { continue; }
+
+          const nowTs = Math.floor(Date.now() / 1000);
+          if (nowTs < endTime + TIME_BUFFER) continue; // reveal window not open yet
+          if (nowTs > endTime + TIME_BUFFER + revealDuration) {
+            console.warn(`[Admin auto-reveal] Reveal window closed for poll #${pollId}`);
+            continue;
+          }
+
+          // Reveal all voters for this poll
+          for (const { key, voterAddr, salt, optId } of voters) {
+            if (cancelled) break;
+            if (!salt || optId == null) continue;
+
+            try {
+              const alreadyRevealed = await sbmRead.hasRevealed(pollId, voterAddr);
+              if (alreadyRevealed) {
+                try {
+                  const s = JSON.parse(localStorage.getItem('__sb_salts') || '{}');
+                  const o = JSON.parse(localStorage.getItem('__sb_options') || '{}');
+                  delete s[key]; delete o[key];
+                  localStorage.setItem('__sb_salts', JSON.stringify(s));
+                  localStorage.setItem('__sb_options', JSON.stringify(o));
+                } catch {}
+                continue;
+              }
+
+              const account = HARDHAT_ACCOUNTS.find(a => a.address.toLowerCase() === voterAddr.toLowerCase());
+              if (!account) continue;
+              const voterSigner = new ethers.Wallet(account.key, provider);
+
+              console.log(`[Admin auto-reveal] Revealing vote for poll #${pollId}, voter ${voterAddr.slice(0, 10)}...`);
+              const sbmSigner = getSecretBallotManagerContract(voterSigner);
+              const tx = await sendTxWithNonceRetry({
+                signer: voterSigner,
+                sendTx: (overrides = {}) => sbmSigner.revealVote(pollId, optId, salt, overrides),
+                onRetry: () => console.log(`[Admin auto-reveal] Retrying reveal for poll #${pollId}...`)
+              });
+              await tx.wait();
+              console.log(`[Admin auto-reveal] ✅ Revealed vote for poll #${pollId}, voter ${voterAddr.slice(0, 10)}`);
+
+              // Clean up localStorage
+              try {
+                const s = JSON.parse(localStorage.getItem('__sb_salts') || '{}');
+                const o = JSON.parse(localStorage.getItem('__sb_options') || '{}');
+                delete s[key]; delete o[key];
+                localStorage.setItem('__sb_salts', JSON.stringify(s));
+                localStorage.setItem('__sb_options', JSON.stringify(o));
+              } catch {}
+              anyRevealed = true;
+            } catch (err) {
+              console.warn(`[Admin auto-reveal] Failed for poll #${pollId}, voter ${voterAddr.slice(0, 10)}:`, err.message?.substring(0, 150));
+            }
+          }
+        }
+
+        // Only refresh polls once at the end (not per voter — saves time)
+        if (anyRevealed && !cancelled) {
+          await loadPolls();
+        }
+      } finally {
+        isRunning = false;
+      }
+    }
+
+    // Run immediately, then every 5 seconds
+    tryAutoRevealFromAdmin();
+    const interval = setInterval(tryAutoRevealFromAdmin, 5_000);
+    return () => { cancelled = true; clearInterval(interval); };
+  }, [addr, walletSigner, mode]); // eslint-disable-line
+
   const formatTimeRemaining = (endTime) => {
     const now = Math.floor(Date.now() / 1000);
     const remaining = endTime - now;
@@ -1889,7 +2548,7 @@ export default function AdminPanel({ mode = 'production', role }) {
     { id: 'create', label: 'Create Poll', icon: '➕', showWhen: () => isOwner || isFranchisee },
     { id: 'participants', label: 'Candidates & Voters', icon: '👥', showWhen: () => isOwner || isFranchisee, needsPolls: true },
     { id: 'settings', label: 'Poll Settings', icon: '⚙️', showWhen: () => isOwner || isFranchisee, needsPolls: true },
-    { id: 'franchises', label: 'Franchises', icon: '🏢', showWhen: () => (isOwner || isFranchisee) && !isFranchiseeRole },
+    { id: 'franchises', label: 'Franchises', icon: '🏢', showWhen: () => isOwner || isFranchisee },
     { id: 'infra', label: 'Infrastructure', icon: '🔧', ownerOnly: true },
   ];
 
@@ -1994,6 +2653,33 @@ export default function AdminPanel({ mode = 'production', role }) {
     const timeLabel = isEndedEffective ? 'Ended' : isUpcoming ? formatTimeUntil(poll.startTime) : formatTimeRemaining(poll.endTime);
     const chipClass = st.revealed ? 'chip-success' : isEndedEffective ? 'chip-warning' : isActiveEffective ? '' : 'chip-warning';
     return { st, isEndedEffective, isUpcoming, isActiveEffective, statusLabel, timeLabel, chipClass };
+  }
+
+  // ─── Incomplete poll detection ─────────────────────────────────────────────
+  function getPollIncompleteWarnings(poll) {
+    const warnings = [];
+    const info = getPollStatusInfo(poll);
+    if (info.st.revealed || info.isEndedEffective) return warnings; // no point warning for ended polls
+
+    // Only warn about genuinely incomplete setup — missing candidates
+    if (poll.optionsCount === 0 && (info.isActiveEffective || info.isUpcoming)) {
+      warnings.push('No candidates added — voters will have nothing to vote on. Add candidates before the poll starts.');
+    }
+
+    // Gasless voting enabled but paymaster may be underfunded
+    if (poll.tokenConfig?.allowGaslessVoting && (info.isActiveEffective || info.isUpcoming)) {
+      const budget = getPaymasterBudgetStatus();
+      if (budget) {
+        if (budget.balance === 0) {
+          warnings.push('Gasless voting is enabled but paymaster has zero balance — voters will not be able to vote gaslessly');
+        } else if (budget.maxVotersAffordable < 1) {
+          warnings.push('Paymaster balance too low to sponsor even one gasless vote — fund the paymaster');
+        }
+      } else if (!myFranchise?.votingPaymaster || myFranchise.votingPaymaster === ethers.ZeroAddress) {
+        warnings.push('Gasless voting is enabled but no paymaster is configured');
+      }
+    }
+    return warnings;
   }
 
   return (
@@ -2142,15 +2828,26 @@ export default function AdminPanel({ mode = 'production', role }) {
                   <tbody>
                     {dashboardPollsPage.map(poll => {
                       const info = getPollStatusInfo(poll);
+                      const incompleteWarnings = getPollIncompleteWarnings(poll);
                       return (
                         <React.Fragment key={poll.id}>
-                          <tr>
+                          <tr className={incompleteWarnings.length > 0 ? 'row-warning' : ''}>
                             <td>{poll.id}</td>
-                            <td>{poll.title}</td>
+                            <td>
+                              {poll.title}
+                              {incompleteWarnings.length > 0 && (
+                                <span className="chip chip-danger" style={{ marginLeft: 6, fontSize: 10 }}>⚠ Incomplete</span>
+                              )}
+                            </td>
                             <td className="muted small" style={{ maxWidth: 140, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{poll.admin}</td>
                             <td><span className={`chip ${info.chipClass}`}>{info.statusLabel}</span></td>
                             <td>{info.timeLabel}</td>
-                            <td>{poll.optionsCount}</td>
+                            <td>
+                              {poll.optionsCount}
+                              {poll.optionsCount === 0 && !info.isEndedEffective && !info.st.revealed && (
+                                <span style={{ color: '#b42318', marginLeft: 4 }}>⚠</span>
+                              )}
+                            </td>
                             <td>{poll.totalVotes}</td>
                             <td style={{ display: 'flex', gap: '0.25rem', flexWrap: 'wrap' }}>
                               <button className="btn btn-sm secondary" onClick={() => togglePollDetails(poll.id)}>
@@ -2161,45 +2858,105 @@ export default function AdminPanel({ mode = 'production', role }) {
                                 const nowSec = Math.floor(Date.now() / 1000);
                                 const TIME_BUFFER = 30;
                                 const revealDuration = poll.isSecretBallot ? (poll.revealDuration || 3600) : 0;
-                                // Standard poll: can reveal after endTime + TIME_BUFFER
-                                // Secret ballot: can reveal after endTime + TIME_BUFFER + revealDuration
-                                const revealableAfter = poll.isSecretBallot
-                                  ? (poll.endTime + TIME_BUFFER + revealDuration)
-                                  : (poll.endTime + TIME_BUFFER);
-                                const canReveal = info.isEndedEffective && nowSec >= revealableAfter;
-                                const waitingForRevealPeriod = info.isEndedEffective && !canReveal;
-                                const revealCountdown = waitingForRevealPeriod ? Math.max(0, revealableAfter - nowSec) : 0;
-                                const revealMins = Math.floor(revealCountdown / 60);
-                                const revealSecs = revealCountdown % 60;
-                                return (
-                                  <>
-                                    {canReveal && (
-                                      <button className="btn btn-sm" onClick={() => revealResults(poll.id)} disabled={loading}>Reveal</button>
-                                    )}
-                                    {waitingForRevealPeriod && (
+
+                                // For secret ballots: check if voter votes still need revealing
+                                const hasUnrevealedVotes = poll.isSecretBallot && poll.sbStatus
+                                  && poll.sbStatus.commits > 0
+                                  && poll.sbStatus.reveals < poll.sbStatus.commits;
+
+                                // Timing thresholds
+                                const revealWindowStart = poll.endTime + TIME_BUFFER;
+                                const revealWindowEnd = poll.endTime + TIME_BUFFER + revealDuration;
+                                const inRevealWindow = info.isEndedEffective && nowSec >= revealWindowStart && nowSec < revealWindowEnd;
+                                const pastRevealWindow = info.isEndedEffective && nowSec >= revealWindowEnd;
+
+                                if (poll.isSecretBallot) {
+                                  // Secret ballot: show Reveal All as soon as reveal window opens
+                                  if (info.isEndedEffective && nowSec >= revealWindowStart) {
+                                    return (
                                       <>
-                                        {/* For secret ballots: hide Reveal button during voter reveal period — voters must reveal first */}
-                                        {!poll.isSecretBallot && (
-                                          <button className="btn btn-sm" onClick={() => revealResults(poll.id)} disabled={loading}>
-                                            Reveal
-                                          </button>
-                                        )}
+                                        <button className="btn btn-sm" onClick={() => revealResults(poll.id)} disabled={loading}>
+                                          {hasUnrevealedVotes ? 'Reveal All' : 'Reveal'}
+                                        </button>
                                         <span className="muted small" style={{ alignSelf: 'center' }}>
-                                          {poll.isSecretBallot
-                                            ? `⏳ Voters revealing (${revealMins}m ${revealSecs}s left) — ${poll.sbStatus?.reveals ?? '?'}/${poll.sbStatus?.commits ?? '?'} revealed`
-                                            : `Finalizing (${revealSecs}s)...`}
+                                          {inRevealWindow
+                                            ? `⏳ Reveal phase (${Math.floor((revealWindowEnd - nowSec) / 60)}m ${(revealWindowEnd - nowSec) % 60}s left) — ${poll.sbStatus?.reveals ?? '?'}/${poll.sbStatus?.commits ?? '?'} revealed`
+                                            : hasUnrevealedVotes
+                                              ? `${poll.sbStatus.reveals}/${poll.sbStatus.commits} votes revealed`
+                                              : 'Ready to finalize'}
                                         </span>
                                       </>
-                                    )}
-                                  </>
-                                );
+                                    );
+                                  }
+                                  // Before reveal window opens
+                                  if (info.isEndedEffective && nowSec < revealWindowStart) {
+                                    const waitSec = revealWindowStart - nowSec;
+                                    return (
+                                      <span className="muted small" style={{ alignSelf: 'center' }}>
+                                        ⏳ Reveal window opens in {waitSec}s
+                                      </span>
+                                    );
+                                  }
+                                  return null;
+                                }
+
+                                // Standard (non-secret) poll
+                                const canReveal = info.isEndedEffective && nowSec >= revealWindowStart;
+                                if (canReveal) {
+                                  return <button className="btn btn-sm" onClick={() => revealResults(poll.id)} disabled={loading}>Reveal</button>;
+                                }
+                                if (info.isEndedEffective) {
+                                  const waitSec = revealWindowStart - nowSec;
+                                  return <span className="muted small" style={{ alignSelf: 'center' }}>Finalizing ({waitSec}s)...</span>;
+                                }
+                                return null;
                               })()}
                             </td>
                           </tr>
+                          {expandedPoll === poll.id && incompleteWarnings.length > 0 && (
+                            <tr>
+                              <td colSpan="8" style={{ padding: 0 }}>
+                                <div className="incomplete-warning">
+                                  <span className="warn-icon">⚠️</span>
+                                  <div>
+                                    <strong>This poll is incomplete and voters may not be able to vote:</strong>
+                                    <ul>
+                                      {incompleteWarnings.map((w, i) => <li key={i}>{w}</li>)}
+                                    </ul>
+                                    <div style={{ marginTop: 4 }}>
+                                      <button className="btn btn-sm" onClick={() => setActiveTab('participants')} style={{ marginRight: 6 }}>Go to Candidates & Voters</button>
+                                      <button className="btn btn-sm secondary" onClick={() => setActiveTab('settings')}>Go to Poll Settings</button>
+                                    </div>
+                                  </div>
+                                </div>
+                              </td>
+                            </tr>
+                          )}
                           {expandedPoll === poll.id && poll.options && (
                             <tr>
                               <td colSpan="8" style={{ padding: '0.5rem 1rem', background: 'var(--surface-alt, #f7f8fa)' }}>
                                 <strong>Candidates</strong>
+                                {/* Tie / Winner detection for revealed polls */}
+                                {poll.revealed && poll.options.length > 0 && (() => {
+                                  const maxVotes = Math.max(...poll.options.map(o => o.votes ?? 0));
+                                  if (maxVotes === 0) return null;
+                                  const topCandidates = poll.options.filter(o => (o.votes ?? 0) === maxVotes);
+                                  if (topCandidates.length > 1) {
+                                    return (
+                                      <div className="winner-card is-tie" style={{ marginTop: '0.5rem' }}>
+                                        <strong>🤝 Tie!</strong> {topCandidates.length} candidates tied with {maxVotes} vote{maxVotes !== 1 ? 's' : ''} each:
+                                        <div className="tie-candidates">
+                                          {topCandidates.map(c => <span key={c.id} className="chip">{c.name}</span>)}
+                                        </div>
+                                      </div>
+                                    );
+                                  }
+                                  return (
+                                    <div className="winner-card" style={{ marginTop: '0.5rem' }}>
+                                      <strong>🏆 Winner:</strong> {topCandidates[0].name} ({maxVotes} votes)
+                                    </div>
+                                  );
+                                })()}
                                 <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.5rem', marginTop: '0.25rem' }}>
                                   {poll.options.map(opt => (
                                     <span key={opt.id} className="chip">
@@ -2320,18 +3077,26 @@ export default function AdminPanel({ mode = 'production', role }) {
                 <label className="form-label">Reveal Duration (minutes) <span className="muted small">— for secret ballot</span></label>
                 <input
                   type="number"
-                  min="1"
+                  min="5"
                   placeholder="Reveal duration (minutes)"
                   value={pollRevealDuration}
                   onChange={e => setPollRevealDuration(e.target.value)}
                   className="form-input"
                 />
                 <div className="muted small">
-                  Time window for voters to reveal their secret votes after poll ends. Default: 60 minutes.
+                  Time window for voters to reveal their secret votes after poll ends. Default: 60 minutes. Minimum recommended: 5 minutes.
+                  {Number(pollRevealDuration) > 0 && Number(pollRevealDuration) < 5 && (
+                    <strong style={{ color: 'var(--danger, #c00)' }}> Warning: Very short reveal window! Votes may fail to auto-reveal in time.</strong>
+                  )}
                   {Number(pollRevealDuration) > 0 && (
                     <strong> Note: Polls with secret ballot will start 90 seconds from creation to allow configuration time.</strong>
                   )}
                 </div>
+                {Number(pollRevealDuration) > 0 && (
+                  <div className="muted small" style={{ color: 'var(--info, #268bd2)', fontWeight: 500 }}>
+                    ℹ️ For secret ballot polls, gasless voting works by sponsoring gas from the paymaster to the voter. The voter still commits the vote themselves (required for secret ballot security), but the gas cost is covered by the paymaster.
+                  </div>
+                )}
 
                 <button type="submit" className="btn" disabled={loading}>
                   {loading ? 'Creating...' : 'Create Poll'}
@@ -2467,13 +3232,41 @@ export default function AdminPanel({ mode = 'production', role }) {
                     />
                     <div className="muted small">Suggested: 3600 (1h), 86400 (1d), 604800 (1w)</div>
                     <label className="form-label" style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                      <input type="checkbox" checked={fpEnableToken} onChange={e => setFpEnableToken(e.target.checked)} />
+                      <input type="checkbox" checked={fpEnableToken} onChange={e => {
+                        setFpEnableToken(e.target.checked);
+                        if (!e.target.checked) { setFpRequireToken(false); setFpAllowGasless(false); }
+                      }} />
                       Enable Token Voting
                     </label>
-                    <label className="form-label" style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                      <input type="checkbox" checked={fpRequireToken} onChange={e => setFpRequireToken(e.target.checked)} />
-                      Require Token Voting
-                    </label>
+                    {fpEnableToken && (
+                      <>
+                        <label className="form-label" style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                          <input type="checkbox" checked={fpRequireToken} onChange={e => setFpRequireToken(e.target.checked)} />
+                          Require Token Voting
+                        </label>
+                        <input
+                          type="number"
+                          min="1"
+                          placeholder="Tokens per voter"
+                          value={fpTokensPerVoter}
+                          onChange={e => setFpTokensPerVoter(e.target.value)}
+                          className="form-input"
+                        />
+                        <div className="muted small">Number of tokens each voter receives for this poll</div>
+                        <label className="form-label" style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                          <input type="checkbox" checked={fpAllowGasless} onChange={e => setFpAllowGasless(e.target.checked)} />
+                          Allow gasless voting (⛽ voters pay zero gas)
+                        </label>
+                        {fpAllowGasless && (
+                          <div className="muted small">Requires a funded paymaster. Voters will see a "⛽ Vote Gasless" button.</div>
+                        )}
+                        {fpAllowGasless && (
+                          <div className="muted small" style={{ color: 'var(--info, #268bd2)' }}>
+                            ℹ️ For secret ballot polls, gasless voting sponsors gas to the voter from the paymaster. Works with both regular and secret ballot polls.
+                          </div>
+                        )}
+                      </>
+                    )}
                     {myFranchise.feePerPoll !== '0.0' && (
                       <div className="muted small">Fee: {myFranchise.feePerPoll} ETH will be sent with this transaction.</div>
                     )}
@@ -2482,6 +3275,16 @@ export default function AdminPanel({ mode = 'production', role }) {
                     </button>
                   </form>
                 )}
+                <div className="setup-reminder">
+                  <h4>📝 Poll Setup Checklist</h4>
+                  <ol>
+                    <li><strong>Create the poll</strong> (title, start time, duration)</li>
+                    <li><strong>Add candidates</strong> — go to <em>Candidates & Voters</em> tab</li>
+                    <li><strong>Authorize voters</strong> — add voter addresses in <em>Candidates & Voters</em> tab</li>
+                    <li><em>(Optional)</em> Configure poll settings (secret ballot, quadratic, etc.)</li>
+                  </ol>
+                  <div className="muted small">All steps must be completed <strong>before</strong> the poll start time. If candidates or voters are missing, nobody will be able to cast a vote.</div>
+                </div>
               </section>
             </>
             )}
@@ -2495,6 +3298,29 @@ export default function AdminPanel({ mode = 'production', role }) {
       {/* ═══════════════════════════════════════════════════════════════ */}
       {addr && (isOwner || isFranchisee) && activeTab === 'participants' && polls.length > 0 && (
         <div className="admin-tab-content">
+          {/* Incomplete polls warning banner */}
+          {(() => {
+            const incompletePolls = polls.filter(p => {
+              const w = getPollIncompleteWarnings(p);
+              return w.length > 0;
+            });
+            if (incompletePolls.length === 0) return null;
+            return (
+              <div className="incomplete-warning" style={{ marginBottom: 16 }}>
+                <span className="warn-icon">⚠️</span>
+                <div>
+                  <strong>{incompletePolls.length} poll{incompletePolls.length > 1 ? 's are' : ' is'} incomplete and may not allow voting:</strong>
+                  <ul>
+                    {incompletePolls.map(p => (
+                      <li key={p.id}>
+                        <strong>#{p.id} {p.title}</strong>: {p.optionsCount === 0 ? 'No candidates added' : 'No votes yet — check voter authorization'}
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              </div>
+            );
+          })()}
           <div className="admin-tab-grid">
             {/* Add Candidate */}
             <section className="panel-card">
@@ -2671,6 +3497,11 @@ export default function AdminPanel({ mode = 'production', role }) {
                   onChange={e => setSecretBallotPollId(e.target.value)}
                   filterFn={p => !p.ended && !p.isSecretBallot}
                 />
+                {secretBallotPollId && polls.find(p => String(p.id) === String(secretBallotPollId))?.tokenConfig?.allowGaslessVoting && (
+                  <div className="muted small" style={{ color: 'var(--info, #268bd2)' }}>
+                    ℹ️ This poll has gasless voting enabled. For secret ballots, gas will be sponsored from the paymaster to the voter so they can commit their vote at zero cost.
+                  </div>
+                )}
                 <label className="form-label">Reveal Duration <span className="muted small">(minutes, default 60)</span></label>
                 <input
                   type="number"
@@ -2816,6 +3647,134 @@ export default function AdminPanel({ mode = 'production', role }) {
                   </div>
                 </section>
 
+                {/* Gasless Voting Budget */}
+                <section className="panel-card">
+                  <div className="panel-head">
+                    <h3>Gasless Voting Budget</h3>
+                    {myFranchise.votingPaymaster && myFranchise.votingPaymaster !== ethers.ZeroAddress ? (
+                      <span className="chip chip-success">Paymaster Active</span>
+                    ) : (
+                      <span className="chip chip-warning">No Paymaster</span>
+                    )}
+                  </div>
+
+                  {myFranchise.votingPaymaster && myFranchise.votingPaymaster !== ethers.ZeroAddress ? (
+                    <>
+                      <div className="meta-list">
+                        <div>
+                          <span>Paymaster Address</span>
+                          <strong style={{ wordBreak: 'break-all', fontSize: 12 }}>{myFranchise.votingPaymaster}</strong>
+                        </div>
+                        <div>
+                          <span>Current Balance</span>
+                          <strong>{paymasterBalance ?? myFranchise.paymasterBalance ?? 'Loading...'} ETH</strong>
+                        </div>
+                      </div>
+
+                      {/* Auto-warning if paymaster balance is low */}
+                      {(() => {
+                        const budget = getPaymasterBudgetStatus();
+                        if (!budget) return null;
+                        const isLow = budget.balance > 0 && budget.maxVotersAffordable < 10;
+                        const isEmpty = budget.balance === 0;
+                        if (!isLow && !isEmpty) return null;
+                        return (
+                          <div className="incomplete-warning" style={{ marginTop: 12 }}>
+                            <span className="warn-icon">⚠️</span>
+                            <div>
+                              {isEmpty ? (
+                                <strong>Paymaster has zero balance! Gasless voting will fail for all voters.</strong>
+                              ) : (
+                                <>
+                                  <strong>Paymaster balance is low.</strong>
+                                  <div className="muted small" style={{ marginTop: 4 }}>
+                                    Current balance can only sponsor ~{budget.maxVotersAffordable} gasless vote{budget.maxVotersAffordable !== 1 ? 's' : ''}.
+                                    You have {budget.gaslessPollCount} active gasless poll{budget.gaslessPollCount !== 1 ? 's' : ''}.
+                                    Use the estimator below or fund the paymaster to avoid failed votes.
+                                  </div>
+                                </>
+                              )}
+                            </div>
+                          </div>
+                        );
+                      })()}
+
+                      {/* Gas Cost Estimator */}
+                      <div style={{ marginTop: 16, padding: '12px', background: 'var(--bg-tertiary, #f5f5f5)', borderRadius: 8 }}>
+                        <label className="form-label" style={{ fontWeight: 600 }}>Estimate Gas Budget</label>
+                        <div className="muted small" style={{ marginBottom: 8 }}>
+                          Enter the number of voters you plan to authorize. This estimates how much ETH your paymaster needs to sponsor all their votes.
+                        </div>
+                        <div style={{ display: 'flex', gap: 8, alignItems: 'flex-end' }}>
+                          <input
+                            type="number" min="1" placeholder="Number of voters"
+                            value={gasEstimateVoters}
+                            onChange={e => { setGasEstimateVoters(e.target.value); setGasEstimateResult(null); }}
+                            className="form-input"
+                            style={{ flex: 1 }}
+                          />
+                          <button type="button" className="btn btn-sm secondary" onClick={estimateGasCost} disabled={!gasEstimateVoters}>
+                            Estimate
+                          </button>
+                        </div>
+                        {gasEstimateResult && (
+                          <div style={{ marginTop: 12 }}>
+                            <div className="meta-list">
+                              <div><span>Cost per voter</span><strong>~{gasEstimateResult.perVoteEth} ETH</strong></div>
+                              <div><span>Total for {gasEstimateResult.voters} voters</span><strong>~{gasEstimateResult.totalEth} ETH</strong></div>
+                              <div><span>Current balance</span><strong>{gasEstimateResult.currentBalance} ETH</strong></div>
+                              <div>
+                                <span>Shortfall</span>
+                                <strong style={{ color: gasEstimateResult.sufficient ? 'var(--success, green)' : 'var(--danger, #c00)' }}>
+                                  {gasEstimateResult.sufficient ? 'None — fully funded ✓' : `${gasEstimateResult.deficit} ETH needed`}
+                                </strong>
+                              </div>
+                            </div>
+                          </div>
+                        )}
+                      </div>
+
+                      {/* Fund Paymaster */}
+                      <form onSubmit={handleFundPaymaster} className="form-stack" style={{ marginTop: 16 }}>
+                        <label className="form-label">Add Funds to Paymaster</label>
+                        <div style={{ display: 'flex', gap: 8 }}>
+                          <input
+                            type="text" placeholder="ETH amount (e.g. 0.5)"
+                            value={paymasterFundAmount}
+                            onChange={e => setPaymasterFundAmount(e.target.value)}
+                            className="form-input"
+                            style={{ flex: 1 }}
+                          />
+                          <button type="submit" className="btn" disabled={loading || !paymasterFundAmount}>
+                            {loading ? 'Funding...' : 'Fund'}
+                          </button>
+                        </div>
+                        {gasEstimateResult && !gasEstimateResult.sufficient && (
+                          <button
+                            type="button"
+                            className="btn btn-sm"
+                            onClick={() => setPaymasterFundAmount(gasEstimateResult.deficit)}
+                          >
+                            Auto-fill shortfall ({gasEstimateResult.deficit} ETH)
+                          </button>
+                        )}
+                      </form>
+
+                      <div style={{ marginTop: 12 }}>
+                        <button className="btn btn-sm secondary" onClick={loadPaymasterBalance} disabled={loading}>
+                          Refresh Balance
+                        </button>
+                      </div>
+                    </>
+                  ) : (
+                    <div className="muted" style={{ padding: '8px 0' }}>
+                      No custom paymaster is assigned to your franchise. Your polls will use the system-wide paymaster (funded by the contract owner).
+                      <br /><br />
+                      <span className="muted small">To get a dedicated paymaster, ask the contract owner to deploy one for you and re-grant your franchise with the paymaster address.</span>
+                    </div>
+                  )}
+                </section>
+
                 {/* Quick Links */}
                 <section className="panel-card">
                   <div className="panel-head">
@@ -2908,12 +3867,23 @@ export default function AdminPanel({ mode = 'production', role }) {
                       className="form-input"
                     />
                     <label className="form-label">Custom VotingPaymaster <span className="muted small">(optional, blank = use global)</span></label>
-                    <input
-                      type="text" placeholder="0x... (leave blank for default gas sponsor)"
-                      value={grantPaymaster} onChange={e => setGrantPaymaster(e.target.value)}
-                      className="form-input"
-                    />
-                    <div className="muted small">If set, this franchisee's polls will use the specified paymaster for gasless vote sponsorship instead of the global one.</div>
+                    <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+                      <input
+                        type="text" placeholder="0x... (leave blank for default gas sponsor)"
+                        value={grantPaymaster} onChange={e => setGrantPaymaster(e.target.value)}
+                        className="form-input" style={{ flex: 1 }}
+                      />
+                      <button
+                        type="button"
+                        className="btn secondary"
+                        disabled={deployingPaymaster || loading}
+                        onClick={handleDeployPaymaster}
+                        style={{ whiteSpace: 'nowrap' }}
+                      >
+                        {deployingPaymaster ? 'Deploying…' : 'Deploy New'}
+                      </button>
+                    </div>
+                    <div className="muted small">If set, this franchisee's polls will use the specified paymaster for gasless vote sponsorship instead of the global one. Click "Deploy New" to create a dedicated paymaster with the franchisee as admin.</div>
                     <button type="submit" className="btn" disabled={loading}>
                       {loading ? 'Granting...' : 'Grant Franchise'}
                     </button>
@@ -2929,7 +3899,7 @@ export default function AdminPanel({ mode = 'production', role }) {
                       className="form-input"
                     >
                       <option value="">Select Franchise</option>
-                      {franchises.map(f => (
+                      {franchises.filter(f => !f.superseded).map(f => (
                         <option key={f.id} value={f.id}>
                           #{f.id}: {f.franchisee.slice(0, 8)}... ({f.pollsUsed}/{f.maxPolls} used)
                         </option>
@@ -3031,13 +4001,13 @@ export default function AdminPanel({ mode = 'production', role }) {
                       </thead>
                       <tbody>
                         {franchisesPage.map(f => {
-                          const isActive = !f.expired && !f.exhausted;
+                          const isActive = !f.expired && !f.exhausted && !f.superseded;
                           const remaining = f.maxPolls - f.pollsUsed;
                           return (
-                            <tr key={f.id}>
+                            <tr key={f.id} style={f.superseded ? { opacity: 0.55 } : undefined}>
                               <td>{f.id}</td>
                               <td className="muted small" style={{ maxWidth: 140, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{f.franchisee}</td>
-                              <td><span className={`chip ${isActive ? 'chip-success' : 'chip-warning'}`}>{f.expired ? 'Expired' : f.exhausted ? 'Exhausted' : 'Active'}</span></td>
+                              <td><span className={`chip ${isActive ? 'chip-success' : 'chip-warning'}`}>{f.superseded ? 'Superseded' : f.expired ? 'Expired' : f.exhausted ? 'Exhausted' : 'Active'}</span></td>
                               <td>{new Date(f.expiresAt * 1000).toLocaleDateString()}</td>
                               <td>{f.pollsUsed} / {f.maxPolls}</td>
                               <td>{remaining}</td>
