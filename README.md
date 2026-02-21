@@ -5,9 +5,7 @@ This project is proprietary and licensed under Ankit Soral's terms. Unauthorized
 
 **License:** Copyright (c) 2026 Ankit Soral. All rights reserved.
 
-**Contact:** ankit.soral@outlokk.com
-
-For licensing or audit inquiries, contact Ankit Soral.
+**Contact:** ankit.soral@outlook.com
 
 A decentralized election voting system built with React and Solidity smart contracts. This application provides a complete voting platform with admin controls, voter authorization, time-based voting, and result management.
 

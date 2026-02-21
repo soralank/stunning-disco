@@ -1,5 +1,13 @@
 # Contributing to Stunning Disco
 
+This project is proprietary and licensed under Ankit Soral's terms. Unauthorized use is prohibited.
+
+**Project Status:** The React frontend and smart contract integration are complete. Only a professional security audit is pending.
+
+**License:** Copyright (c) 2026 Ankit Soral. All rights reserved.
+
+See [README.md](README.md) for contact and licensing details.
+
 Thank you for your interest in contributing to this project! Please follow these guidelines to help us maintain a high-quality codebase.
 
 ## How to Contribute
@@ -25,6 +33,3 @@ Thank you for your interest in contributing to this project! Please follow these
 
 ## License
 This project is proprietary and licensed under Ankit Soral's terms. Please respect the license and do not use the code without permission.
-
----
-Contact: ankit.soral@outlook.com

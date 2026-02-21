@@ -5,7 +5,7 @@ This project is proprietary and licensed under Ankit Soral's terms. Unauthorized
 
 **License:** Copyright (c) 2026 Ankit Soral. All rights reserved.
 
-For licensing or audit inquiries, contact Ankit Soral.
+See [README.md](README.md) for contact and licensing details.
 
 ## Who is this for?
 This guide is for **franchisee owners** (organization admins) who create and manage polls for their group.
