@@ -7,6 +7,22 @@ import franchiseeManagerLocalABI from './franchiseeManager.abi.json';
 import votingReaderLocalABI from './votingReader.abi.json';
 import { devWarn } from '../utils/logger';
 
+/**
+ * Resolve an IPFS URI (ipfs://CID or ipfs://CID/path) to an HTTP gateway URL.
+ * Uses REACT_APP_IPFS_GATEWAY env var (should end with /ipfs/).
+ * Returns the original URI unchanged if it is not an ipfs:// URI or no gateway is configured.
+ */
+export function resolveIpfsUri(uri) {
+	if (!uri || typeof uri !== 'string') return uri;
+	const match = uri.match(/^ipfs:\/\/(.+)/);
+	if (!match) return uri;
+	const gateway = process.env.REACT_APP_IPFS_GATEWAY;
+	if (!gateway) return uri;
+	// Ensure gateway ends with /
+	const base = gateway.endsWith('/') ? gateway : gateway + '/';
+	return base + match[1];
+}
+
 let ABI;
 let TOKEN_MANAGER_ABI = tokenManagerLocalABI;
 let VOTING_PAYMASTER_ABI = votingPaymasterLocalABI;

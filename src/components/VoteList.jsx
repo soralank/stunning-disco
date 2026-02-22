@@ -1,5 +1,5 @@
 import React, { useEffect, useState, useMemo } from 'react';
-import { getProvider, getSigner, getContract, getContractErrorDetails, sendTxWithNonceRetry, getSecretBallotManagerContract, getVotingPaymasterContract, getVotingPaymasterAt, getVotingReaderContract } from '../contract';
+import { getProvider, getSigner, getContract, getContractErrorDetails, sendTxWithNonceRetry, getSecretBallotManagerContract, getVotingPaymasterContract, getVotingPaymasterAt, getVotingReaderContract, resolveIpfsUri } from '../contract';
 import { ethers } from 'ethers';
 import Pagination from './Pagination';
 import SearchBar from './SearchBar';
@@ -1547,9 +1547,12 @@ export default function VoteList({ mode = 'production' }) {
                       )}
                       {poll.metadataURI && (
                         <div className="muted small" style={{ wordBreak: 'break-all' }}>
-                          📎 Metadata: {poll.metadataURI.startsWith('http') ? (
-                            <a href={poll.metadataURI} target="_blank" rel="noopener noreferrer">{poll.metadataURI}</a>
-                          ) : poll.metadataURI}
+                          📎 Metadata: {(() => {
+                            const resolved = resolveIpfsUri(poll.metadataURI);
+                            return resolved.startsWith('http') ? (
+                              <a href={resolved} target="_blank" rel="noopener noreferrer">{poll.metadataURI}</a>
+                            ) : poll.metadataURI;
+                          })()}
                         </div>
                       )}
                     </div>

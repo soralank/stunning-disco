@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useMemo } from 'react';
-import { getSigner, getContract, getProvider, getContractErrorDetails, sendTxWithNonceRetry, getSecretBallotManagerContract, getFranchiseManagerContract, getVotingPaymasterAt, deployVotingPaymaster, getVotingReaderContract } from '../contract';
+import { getSigner, getContract, getProvider, getContractErrorDetails, sendTxWithNonceRetry, getSecretBallotManagerContract, getFranchiseManagerContract, getVotingPaymasterAt, deployVotingPaymaster, getVotingReaderContract, resolveIpfsUri } from '../contract';
 import { ethers } from 'ethers';
 import Pagination from './Pagination';
 import SearchBar from './SearchBar';
@@ -3009,7 +3009,7 @@ export default function AdminPanel({ mode = 'production', role }) {
                                 {poll.quadraticEnabled && <span className="chip" style={{ marginTop: '0.25rem' }}>Quadratic</span>}
                                 {poll.maxChoices > 0 && <span className="chip" style={{ marginTop: '0.25rem' }}>Multi-choice (max {poll.maxChoices})</span>}
                                 {poll.delegationEnabled && <span className="chip" style={{ marginTop: '0.25rem' }}>Delegation</span>}
-                                {poll.metadataURI && <div className="muted small" style={{ marginTop: '0.25rem', wordBreak: 'break-all' }}>Metadata: {poll.metadataURI}</div>}
+                                {poll.metadataURI && <div className="muted small" style={{ marginTop: '0.25rem', wordBreak: 'break-all' }}>Metadata: {(() => { const resolved = resolveIpfsUri(poll.metadataURI); return resolved.startsWith('http') ? <a href={resolved} target="_blank" rel="noopener noreferrer">{poll.metadataURI}</a> : poll.metadataURI; })()}</div>}
                               </td>
                             </tr>
                           )}

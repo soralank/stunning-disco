@@ -1,5 +1,5 @@
 import React, { useEffect, useState, useMemo } from 'react';
-import { getProvider, getContract, getSecretBallotManagerContract, getVotingReaderContract } from '../contract';
+import { getProvider, getContract, getSecretBallotManagerContract, getVotingReaderContract, resolveIpfsUri } from '../contract';
 import { ethers } from 'ethers';
 import Pagination from './Pagination';
 import SearchBar from './SearchBar';
@@ -338,7 +338,7 @@ export default function ResultsList({ mode = 'production' }) {
                                 Commits: {poll.sbStatus.commits} &bull; Reveals: {poll.sbStatus.reveals}
                               </div>
                             )}
-                            {poll.metadataURI && <div className="muted small" style={{ marginTop: 4, wordBreak: 'break-all' }}>Metadata: {poll.metadataURI}</div>}
+                            {poll.metadataURI && <div className="muted small" style={{ marginTop: 4, wordBreak: 'break-all' }}>Metadata: {(() => { const resolved = resolveIpfsUri(poll.metadataURI); return resolved.startsWith('http') ? <a href={resolved} target="_blank" rel="noopener noreferrer">{poll.metadataURI}</a> : poll.metadataURI; })()}</div>}
                             {poll.options.length > 0 && (
                               <div style={{ marginTop: '0.5rem' }}>
                                 <strong>Candidates</strong>
