@@ -1,42 +1,10 @@
 # Complete Voting System Workflow
-This project is proprietary and licensed under Ankit Soral's terms. Unauthorized use is prohibited.
 
-**Project Status:** React frontend and smart contract integration are complete. Only a professional security audit is pending.
+> Copyright © 2026 Ankit Soral. All rights reserved. See [README.md](README.md) for licensing details.
 
-**License:** Copyright (c) 2026 Ankit Soral. All rights reserved.
+This guide walks through the **complete end-to-end process** of creating a poll, adding candidates, authorizing voters, voting, and revealing results using the local testing mode.
 
-See [README.md](README.md) for contact and licensing details.
-
-## What's New
-
-- **Advanced Poll Options:** When creating a poll, you can now enable gasless voting (⛽ Vote Gasless), set tokens-per-voter for token-weighted voting, and enable secret ballot (commit-reveal) mode.
-- **Improved Reveal Flow:** Revealing secret ballot votes now gives instant feedback—if the reveal phase is still active, just retry after it ends (no more waiting loop).
-
-## Overview
-This guide walks through the COMPLETE process of creating a poll, adding candidates, authorizing voters, voting, and revealing results.
-
----
-
-## Prerequisites
-
-1. **Hardhat node running:**
-   ```bash
-   cd /Users/ankit/work/git/votingsystem
-   npx hardhat node
-   ```
-
-2. **Contract deployed:**
-   ```bash
-   cd /Users/ankit/work/git/votingsystem
-   npx hardhat ignition deploy ignition/modules/Voting.ts --network localhost
-   ```
-   Copy the deployed address and update `.env.development`
-
-3. **React app running:**
-   ```bash
-   cd /Users/ankit/work/git/stunning-disco
-   npm start
-   ```
+> **Prerequisites:** Hardhat node running, contract deployed, React app started. See [TESTING.md § Quick Start](TESTING.md#quick-start---local-testing) for setup.
 
 ---
 
@@ -191,89 +159,12 @@ await network.provider.send("evm_mine");
 
 ---
 
-## Common Issues & Solutions
+## Common Issues
 
-### "Error loading polls: could not decode result data"
-**Cause:** Contract address is wrong or contract not deployed
-**Fix:**
-1. Verify Hardhat node is running
-2. Redeploy contract: `npx hardhat ignition deploy ignition/modules/Voting.ts --network localhost`
-3. Update contract address in `.env.development`
-4. Restart React app
-
-### "Poll not showing after creation"
-**Cause:** Page didn't refresh or you're not connected
-**Fix:**
-1. Make sure you're still connected (see your address at the top)
-2. Scroll to the top to see "Your Polls" section
-3. Refresh the page
-
-### "No option to add voters"
-**Cause:** You're looking at the wrong section
-**Fix:**
-1. Make sure you're on `/local/admin` (not `/local/voter`)
-2. Scroll down to find three sections:
-   - Create New Poll
-   - Add Candidate
-   - Add Voters (this is where you add voter addresses)
-
-### "Can't reveal results"
-**Cause:** Poll hasn't ended yet or you're not the admin
-**Fix:**
-1. Wait for the duration to pass (or skip time with Hardhat)
-2. Make sure you're connected as Account #0 (Owner)
-3. The "Reveal Results" button only appears after the poll expires
-
-### "Voters can't see the poll"
-**Cause:** They weren't authorized
-**Fix:**
-1. Go to `/local/admin` as Account #0
-2. Use "Add Voters" section
-3. Select the poll and add voter addresses
-4. Make sure to click "Add Voters" button
+If something goes wrong during the workflow, see [TESTING.md § Troubleshooting](TESTING.md#troubleshooting) for solutions to common problems like contract connection errors, missing polls, and reveal issues.
 
 ---
 
-## Quick Reference: Page Sections
+## Test Accounts
 
-### `/local/admin` (Admin Page)
-- **Top:** Connection + Ownership cards
-- **Middle:** Create New Poll, Add Candidate, Add Voters cards
-- **Bottom:** Manage Polls grid
-
-### `/local/voter` (Voter Page)
-- **Top:** Connection buttons
-- **Middle:** Your Polls (polls you're authorized for)
-- **Each Poll Card:**
-  - Show Candidates & Vote (before voting)
-  - Show Results (after results revealed)
-
----
-
-## Summary of the Complete Flow
-
-```
-1. Admin creates poll → Poll appears in "Your Polls"
-2. Admin adds candidates → Candidates stored in contract
-3. Admin authorizes voters → Voters can see poll on /local/voter
-4. Voters vote → Vote counts increment
-5. Time expires → Poll becomes "Expired"
-6. Admin reveals results → Winner calculated and displayed
-7. Everyone can view results → Winner shown with vote counts
-```
-
----
-
-## Test Accounts Reference
-
-| Account | Address | Private Key | Role |
-|---------|---------|-------------|------|
-| Account #0 | 0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266 | 0xac0974bec... | Owner (can create polls) |
-| Account #1 | 0x70997970C51812dc3A010C7d01b50e0d17dc79C8 | 0x59c6995e9... | Voter |
-| Account #2 | 0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC | 0x5de4111af... | Voter |
-| Account #3 | 0x90F79bf6EB2c4f870365E785982E1f101E93b906 | 0x7c852118... | Voter |
-| Account #4 | 0x2546bcd3c84621e976d8185a91a922ae77ecec30 | 0xea6c44ac... | Voter |
-
----
-
-Happy testing! 🎉
+See [TESTING.md § Test Accounts Reference](TESTING.md#test-accounts-reference) for the full account table (addresses, private keys, roles).

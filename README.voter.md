@@ -1,46 +1,36 @@
-# Stunning Disco Voting System — Voter Guide
-This project is proprietary and licensed under Ankit Soral's terms. Unauthorized use is prohibited.
+# Voter Guide
 
-**Project Status:** React frontend and smart contract integration are complete. Only a professional security audit is pending.
+> Copyright © 2026 Ankit Soral. All rights reserved. See [README.md](README.md) for licensing.
 
-**License:** Copyright (c) 2026 Ankit Soral. All rights reserved.
-
-See [README.md](README.md) for contact and licensing details.
-
-## Who is this for?
-This guide is for **voters** participating in polls created by franchisee owners.
+For **voters** participating in polls.
 
 ---
 
-## 1. Accessing the App
-- Connect your wallet or use the provided account (in local/test mode).
-- The VoteList page shows all polls you are authorized to vote in.
+## Getting Started
+- Connect your wallet (MetaMask) or click an account button (local/test mode).
+- The voter page shows all polls you are authorized to vote in.
 
-## 2. Voting Process
-- For each poll:
-  - Review candidates and poll details
-  - Select your choice(s) and submit your vote
-- For secret ballots:
-  - Your vote is committed (encrypted) first
-  - After the poll ends, you must return to **reveal your vote** (using the same browser/device)
+## Voting
+1. Review candidates and poll details.
+2. Click **Vote** next to your chosen candidate.
+3. Confirm the transaction in your wallet.
 
-## 3. Gasless Voting
-- If enabled, you can vote without paying gas fees (sponsored by the paymaster)
-- If you see a warning about paymaster funds, contact your franchisee owner
+### Gasless Voting
+If enabled by your poll admin, click **⛽ Vote Gasless** — no gas fees required. If you see a paymaster warning, contact your franchisee owner.
 
-## 4. Revealing Your Vote (Secret Ballot)
-- After the poll ends, a "Reveal" button will appear.
-- Click it to reveal your vote (using the salt stored in your browser). The system will attempt to reveal your vote immediately. If the reveal phase is still active, you'll see a message: "Waiting for reveal phase to end..."—just try again after the reveal phase ends (no need to wait on the page).
-- **Do not clear browser storage** before revealing, or your vote cannot be revealed.
+### Secret Ballot
+- Your vote is **committed** (encrypted hash stored on-chain) during the poll.
+- After the poll ends, you **must return to reveal** your vote using the same browser/device.
+- A "Reveal" button will appear. Click it — if the reveal phase hasn't started yet, retry after it begins.
 
-## 5. Results
-- Once all votes are revealed, results will be shown automatically
-- If you see a tie, it will be highlighted in the results
+> **Critical:** Do not clear browser storage before revealing. Your vote salt is stored only in your browser. If lost, your vote is permanently irrecoverable. See [ARCHITECTURE.md § The Salt Problem](ARCHITECTURE.md#critical-insight-the-salt-problem).
 
-## 6. Troubleshooting
-- If you cannot vote, check with your franchisee owner to ensure you are authorized
-- For secret ballots, always use the same browser/device for commit and reveal
-- If you miss the reveal window, your vote may not be counted
+## Results
+- Once votes are revealed, results display automatically with winner and tie detection.
 
----
-For more details, see ARCHITECTURE.md or contact your franchisee owner.
+## Troubleshooting
+- Can't vote → check with your franchisee owner that you're authorized.
+- Secret ballot → always use the same browser/device for commit and reveal.
+- Missed reveal window → your vote may not be counted.
+
+> For more help, see [TESTING.md § Troubleshooting](TESTING.md#troubleshooting) or contact your franchisee owner.

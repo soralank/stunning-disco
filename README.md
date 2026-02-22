@@ -1,39 +1,39 @@
 # Election Voting System
-This project is proprietary and licensed under Ankit Soral's terms. Unauthorized use is prohibited.
 
-**Project Status:** The React frontend and smart contract integration are complete. Only a professional security audit is pending.
+> Copyright © 2026 Ankit Soral. All rights reserved. Proprietary and confidential.\
+> Unauthorized use, reproduction, or distribution is prohibited.
 
-**License:** Copyright (c) 2026 Ankit Soral. All rights reserved.
-
+**Status:** Frontend and smart contract integration complete. Professional security audit pending.\
 **Contact:** ankit.soral@outlook.com
 
-A decentralized election voting system built with React and Solidity smart contracts. This application provides a complete voting platform with admin controls, voter authorization, time-based voting, and result management.
+A decentralized election voting system built with React and Solidity smart contracts. Supports admin controls, voter authorization, time-based voting, gasless meta-transactions (EIP-712), secret ballots (commit-reveal), token-weighted voting, and multi-franchisee poll management.
+
+## Documentation Map
+
+| Document | Audience | Purpose |
+|---|---|---|
+| **[ARCHITECTURE.md](ARCHITECTURE.md)** | Engineers, auditors | Trust model, state ownership, failure UX, security analysis, flow diagrams |
+| **[TESTING.md](TESTING.md)** | Developers, QA | Local setup, mode switching, test checklists, troubleshooting |
+| **[WORKFLOW.md](WORKFLOW.md)** | Developers | End-to-end voting walkthrough with exact steps |
+| **[README.admin.md](README.admin.md)** | System admins | Admin-specific operations and best practices |
+| **[README.franchisee.md](README.franchisee.md)** | Franchisee owners | Poll creation, management, and reveal process |
+| **[README.voter.md](README.voter.md)** | Voters | How to vote, reveal, and view results |
+| **[CONTRIBUTE.md](CONTRIBUTE.md)** | Contributors | Contribution guidelines and code style |
 
 ## Features
 
-- **Owner Controls**: Contract owner can create polls and assign administrators
+- **Owner Controls**: Create polls, assign administrators, transfer ownership
 - **Admin/Franchisee Functions**:
-   - Create polls with custom duration, start time, and advanced options:
-      - Enable gasless voting (⛽ Vote Gasless button for voters)
-      - Set tokens-per-voter for token-weighted voting
-      - Enable secret ballot (commit-reveal)
-   - Add candidates/options to polls
-   - Authorize voters (single or bulk)
-   - Reveal results after voting ends (improved flow: instant feedback, retry if reveal phase is still active)
-   - End polls permanently
+   - Create polls with custom duration, start time, and advanced options (gasless voting, token-weighted voting, secret ballot)
+   - Add candidates, authorize voters (single or bulk), reveal results, end polls
 - **Voter Features**:
-   - View authorized polls
-   - Cast one vote per poll (or weighted votes if enabled)
-   - Vote gaslessly if enabled
-   - Reveal secret ballot votes with instant feedback
-   - View results after they are revealed
-   - See winner or tie when results are revealed
-- **Trusted System**:
-   - Only authorized voters can vote
-   - One vote per person per poll (or weighted by tokens)
-   - Time-based voting periods
-   - Results hidden until revealed by admin/franchisee
+   - View authorized polls, cast votes (standard, gasless, or weighted), reveal secret ballots, view results with winner/tie detection
+- **Contract-Enforced Security**:
+   - One vote per address per poll (contract-enforced, not just UI)
+   - Time-locked voting periods via `block.timestamp`
+   - Results hidden until explicitly revealed
    - Immutable on-chain voting records
+   - All frontend role checks are cosmetic — see [ARCHITECTURE.md § Access Control Model](ARCHITECTURE.md#access-control-model)
 
 ## Prerequisites
 
@@ -41,240 +41,126 @@ A decentralized election voting system built with React and Solidity smart contr
 - MetaMask browser extension or compatible Web3 wallet
 - Hardhat (for local blockchain testing)
 
-## Setup Instructions
+## Quick Setup
 
-### 1. Deploy the Smart Contract
-
-First, deploy the Voting contract from your Solidity project:
+### 1. Start Blockchain & Deploy
 
 ```bash
+# Terminal 1: Start Hardhat node
 cd /Users/ankit/work/git/votingsystem
+npm install && npx hardhat node
 
-# Install dependencies (if not already done)
-npm install
-
-# Start a local Hardhat node (in a separate terminal)
-npx hardhat node
-
-# Deploy the contract (in another terminal)
-npx hardhat run scripts/deploy.js --network localhost
+# Terminal 2: Deploy contracts
+cd /Users/ankit/work/git/votingsystem
+npx hardhat run scripts/deploy-and-setup.js --network localhost
 ```
 
-After deployment, note the contract address. You'll need it for the frontend configuration.
+Copy the contract addresses from the deployment output.
 
-### 2. Configure the React App
+### 2. Configure & Start Frontend
 
 ```bash
 cd /Users/ankit/work/git/stunning-disco
-
-# Install dependencies
 npm install
-
-# Copy the example environment file
 cp .env.example .env.development
-
-# Edit .env.development and set the contract address
-# REACT_APP_CONTRACT_ADDRESS=<your_deployed_contract_address>
+# Edit .env.development with deployed addresses (see Environment Variables below)
+npm start
 ```
 
-Update [.env.development](.env.development) with your deployed contract address:
+App opens at [http://localhost:3000](http://localhost:3000) — defaults to local testing mode.
+
+### 3. MetaMask Network Configuration
+
+| Setting | Value |
+|---|---|
+| Network Name | Hardhat Local |
+| RPC URL | `http://127.0.0.1:8545` |
+| Chain ID | 31337 |
+| Currency | ETH |
+
+### Environment Variables
+
+See [ARCHITECTURE.md § Environment Variables](ARCHITECTURE.md#environment-variables) for the full reference. Minimum required:
 
 ```env
-REACT_APP_CONTRACT_ADDRESS=0x5FbDB2315678afecb367f032d93F642f64180aa3
+REACT_APP_CONTRACT_ADDRESS=<ElectionsManager address>
+REACT_APP_TOKEN_MANAGER_ADDRESS=<TokenManager address>
+REACT_APP_VOTING_PAYMASTER_ADDRESS=<VotingPaymaster address>
+REACT_APP_SECRET_BALLOT_MANAGER_ADDRESS=<SecretBallotManager address>
+REACT_APP_FRANCHISE_MANAGER_ADDRESS=<FranchiseManager address>
+REACT_APP_VOTING_READER_ADDRESS=<VotingReader address>
 REACT_APP_HARDHAT_RPC=http://127.0.0.1:8545
 ```
 
-### 3. Start the Application
+## Usage Overview
 
-```bash
-npm start
-```
+### For Owners / Admins
 
-The application will open at [http://localhost:3000](http://localhost:3000)
-
-## Usage Guide
-
-### For Contract Owners
-
-1. **Connect Wallet**: Click "Connect Wallet" on the Admin page
-2. **Create a Poll**:
-   - Enter a poll title (e.g., "2024 Election")
-   - Optionally specify an admin address (leave blank to use your address)
-   - Optionally set a start time (leave blank to start immediately)
-   - Set duration in seconds (e.g., 3600 for 1 hour)
-   - Click "Create Poll"
-3. **Add Candidates**:
-   - Select the poll from the dropdown
-   - Enter candidate names one by one
-   - Click "Add Candidate"
-4. **Authorize Voters**:
-   - Select the poll
-   - Enter voter addresses (comma-separated for multiple)
-   - Click "Add Voters"
-5. **Manage Poll**:
-   - View poll status and details
-   - After time expires, click "Reveal Results"
-   - Optionally click "End Poll" to permanently close it
+1. Open `/local/admin` (local mode) or `/admin` (production with MetaMask)
+2. Create poll → add candidates → authorize voters → wait for expiry → reveal results
 
 ### For Voters
 
-1. **Connect Wallet**: Click "Connect Wallet to Vote"
-2. **View Your Polls**: See all polls where you're authorized to vote
-3. **Cast Your Vote**:
-   - Click "Show Candidates & Vote" on an active poll
-   - Review the candidates
-   - Click "Vote" next to your chosen candidate
-   - Confirm the transaction in MetaMask
-4. **View Results**: After admin reveals results, click "Show Results" to see vote counts and the winner
+1. Open `/local/voter` (local mode) or `/voter` (production with MetaMask)
+2. View authorized polls → vote → (for secret ballot: return to reveal after poll ends)
 
-## Contract Functions
+> For detailed step-by-step walkthroughs, see [WORKFLOW.md](WORKFLOW.md).
 
-### Owner Functions
-- `createPoll(title, admin, startTime, durationSeconds)` - Create a new poll (start time is a unix timestamp)
-- `transferOwnership(newOwner)` - Transfer contract ownership
+## Contract Functions Reference
 
-### Admin/Owner Functions
-- `addOptionToPoll(pollId, name)` - Add a candidate to a poll
-- `addVoter(pollId, voter)` - Authorize a single voter
-- `addVoters(pollId, voters[])` - Authorize multiple voters
-- `removeVoter(pollId, voter)` - Remove voter authorization
-- `revealResults(pollId)` - Make results public
-- `endPoll(pollId)` - Permanently end a poll
+### Write Functions
 
-### Voter Functions
-- `voteInPoll(pollId, optionId)` - Cast a vote
+| Function | Caller | Description |
+|---|---|---|
+| `createPoll(title, admin, startTime, duration)` | Owner | Create poll with unix timestamp start |
+| `addOptionToPoll(pollId, name)` | Admin/Owner | Add a candidate |
+| `addVoters(pollId, voters[])` | Admin/Owner | Authorize multiple voters |
+| `removeVoter(pollId, voter)` | Admin/Owner | Revoke voter authorization |
+| `voteInPoll(pollId, optionId)` | Voter | Cast a standard vote |
+| `revealResults(pollId)` | Admin/Owner | Make results public |
+| `endPoll(pollId)` | Admin/Owner | Permanently close a poll |
+| `transferOwnership(newOwner)` | Owner | Transfer contract ownership |
 
-### View Functions
-- `polls(pollId)` - Get poll details
-- `getOption(pollId, optionId)` - Get candidate details
-- `isVoterAuthorized(pollId, voter)` - Check voter authorization
-- `hasVoterVoted(pollId, voter)` - Check if voter has voted
-- `isPollActive(pollId)` - Check if poll is active
-- `getWinner(pollId)` - Get winning candidate
-- `getTotalVotes(pollId)` - Get total votes cast
+### Read Functions
 
-## Development Configuration
-
-### Using Local Hardhat Network
-
-1. Start Hardhat node:
-```bash
-cd /Users/ankit/work/git/votingsystem
-npx hardhat node
-```
-
-2. The node provides test accounts with private keys. You can:
-   - Import accounts into MetaMask using the private keys
-   - Or use the built-in local key feature in the Admin panel for development
-
-### Network Configuration
-
-Connect MetaMask to your local network:
-- Network Name: Localhost 8545
-- RPC URL: http://127.0.0.1:8545
-- Chain ID: 31337
-- Currency Symbol: ETH
-
-## Architecture
-
-```
-/Users/ankit/work/git/stunning-disco/
-├── src/
-│   ├── components/
-│   │   ├── AdminPanel.jsx      # Admin controls for managing polls
-│   │   ├── VoteList.jsx         # Voter interface for casting votes
-│   │   └── Layout.jsx           # App layout with navigation
-│   ├── pages/
-│   │   ├── AdminPage.jsx        # Admin page wrapper
-│   │   └── VoterPage.jsx        # Voter page wrapper
-│   ├── contract/
-│   │   ├── index.js             # Web3 provider and contract setup
-│   │   └── abi.json             # Contract ABI
-│   └── App.jsx                  # Main app router
-└── package.json
-
-/Users/ankit/work/git/votingsystem/
-├── contracts/
-│   ├── Voting.sol               # Main voting contract
-│   ├── ElectionsManager.sol     # Core election logic
-│   └── Ownable.sol              # Ownership management
-└── hardhat.config.ts
-```
-
-## Smart Contract Details
-
-The voting system uses the `Voting` contract which inherits from `ElectionsManager`:
-
-- **Poll Creation**: Only owner can create polls with specified admin and duration
-- **Voter Authorization**: Admin or owner can authorize specific addresses to vote
-- **One Vote Per Person**: Contract enforces single vote per address per poll
-- **Time-Based Voting**: Polls have start and end times
-- **Result Privacy**: Results are hidden until admin reveals them
-- **Immutable Records**: All votes are recorded on-chain permanently
-
-## Security Features
-
-- Only authorized voters can vote
-- Owner/admin role separation
-- Time-locked voting periods
-- One vote per address enforcement
-- No duplicate poll titles
-- No duplicate candidate names within a poll
-- Results hidden until explicitly revealed
-- Cannot vote after time expires
-- Cannot modify polls after they end
+| Function | Returns |
+|---|---|
+| `polls(pollId)` | Poll details (title, admin, timing, status) |
+| `getOption(pollId, optionId)` | Candidate name and vote count |
+| `isVoterAuthorized(pollId, voter)` | Boolean |
+| `hasVoterVoted(pollId, voter)` | Boolean |
+| `isPollActive(pollId)` | Boolean |
+| `getWinner(pollId)` | Winning candidate ID |
+| `getTotalVotes(pollId)` | Total votes cast |
 
 ## Troubleshooting
 
-### Contract Connection Issues
-- Ensure Hardhat node is running on port 8545
-- Verify contract address in `.env.development` is correct
-- Check MetaMask is connected to the correct network
+| Problem | Likely Cause | Fix |
+|---|---|---|
+| "Error loading polls" / "could not decode result data" | Wrong contract address or contract not deployed | Verify Hardhat node is running, redeploy, update `.env.development` |
+| Transaction fails silently | Wrong account (owner/admin/voter mismatch) | Check connected account role |
+| MetaMask "wrong network" | Chain ID mismatch | Switch to Hardhat Local (Chain ID 31337) |
+| "Insufficient funds" | Gas fees on production network | Use Hardhat test accounts (10,000 ETH each) for local testing |
+| Build errors | Stale dependencies | `rm -rf node_modules package-lock.json && npm install` |
 
-### Transaction Failures
-- Ensure you have sufficient ETH for gas fees
-- Check you're using the correct account (owner/admin/voter)
-- Verify the poll is still active (for voting)
-- Confirm you haven't already voted (for voting)
-
-### Build Errors
-```bash
-# Clear cache and reinstall
-rm -rf node_modules package-lock.json
-npm cache clean --force
-npm install
-npm start
-```
-
-## Common Use Cases
-
-### Running a Quick Election
-
-1. Owner creates poll: `createPoll("Quick Vote", ownerAddress, 300)` (5 minutes)
-2. Owner adds candidates: "Candidate A", "Candidate B", "Candidate C"
-3. Owner authorizes voters: `addVoters(1, [voter1, voter2, voter3])`
-4. Voters cast their votes within 5 minutes
-5. After 5 minutes, owner reveals results: `revealResults(1)`
-6. Everyone can see the winner
-
-### Organization-Wide Election
-
-1. Owner creates poll with designated admin
-2. Admin adds all candidates
-3. Admin bulk-imports voter list (comma-separated addresses)
-4. Set longer duration (e.g., 86400 for 24 hours)
-5. Voters cast votes at their convenience
-6. After deadline, admin reveals results
-7. Admin ends poll to finalize
-
-## Support
-
-For issues or questions:
-1. Check browser console for error messages
-2. Verify all configuration in `.env.development`
-3. Ensure smart contract is deployed and accessible
-4. Check MetaMask connection and network settings
+> For comprehensive troubleshooting by mode, see [TESTING.md § Troubleshooting](TESTING.md#troubleshooting).
 
 ## License
 
-This project is provided as-is for educational and election management purposes.
+Copyright © 2026 Ankit Soral. All rights reserved. See [LICENSE.txt](LICENSE.txt).
+
+### Dual-License Consideration
+
+This project is currently under a proprietary all-rights-reserved license. For open-source credibility and community adoption, a dual-license model is under evaluation:
+
+| License | Scope | Audience |
+|---|---|---|
+| **AGPL-3.0** (or GPL-3.0) | Default open-source license | Community users, academic use, public forks |
+| **Commercial License** | Proprietary use, SaaS deployment, white-labeling | Enterprise customers, closed-source integrators |
+
+**Why dual-license:**
+- AGPL's copyleft requirement (any network-accessible derivative must publish source) protects the project from closed-source exploitation while allowing genuine open-source use.
+- A separate commercial license provides an explicit path for enterprises that cannot comply with AGPL's source disclosure requirements.
+- This model is well-established in production blockchain tooling (e.g., OpenZeppelin, Foundry, Hardhat plugins).
+
+**Status:** Under evaluation. Contact ankit.soral@outlook.com for licensing inquiries.

@@ -1,35 +1,32 @@
-# Contributing to Stunning Disco
+# Contributing
 
-This project is proprietary and licensed under Ankit Soral's terms. Unauthorized use is prohibited.
+> Copyright © 2026 Ankit Soral. All rights reserved. See [README.md](README.md) for licensing.
 
-**Project Status:** The React frontend and smart contract integration are complete. Only a professional security audit is pending.
-
-**License:** Copyright (c) 2026 Ankit Soral. All rights reserved.
-
-See [README.md](README.md) for contact and licensing details.
-
-Thank you for your interest in contributing to this project! Please follow these guidelines to help us maintain a high-quality codebase.
+Thank you for your interest in contributing! Please follow these guidelines.
 
 ## How to Contribute
 
-1. **Fork the repository** and clone it locally.
-2. **Create a new branch** for your feature or bugfix.
-3. **Write clear, concise code** and add comments where necessary.
+1. **Fork the repository** and clone locally.
+2. **Create a branch** for your feature or bugfix.
+3. **Write clear code** with comments where necessary.
 4. **Add tests** for new features or bugfixes.
-5. **Run tests** to ensure everything works.
-6. **Submit a pull request** with a clear description of your changes.
+5. **Run tests** (`npm test`) to ensure everything passes.
+6. **Submit a pull request** with a clear description.
 
 ## Code Style
-- Use consistent formatting and naming conventions.
-- Keep commits focused and descriptive.
+- Consistent formatting and naming conventions.
+- Focused, descriptive commits.
 
 ## Reporting Issues
-- Use the GitHub Issues tab to report bugs or request features.
-- Provide as much detail as possible.
+- Use GitHub Issues for bugs or feature requests.
+- Include reproduction steps, expected vs actual behavior, and browser/environment details.
+
+## Architecture Reference
+
+Before contributing, read [ARCHITECTURE.md](ARCHITECTURE.md) — especially:
+- [State Ownership Matrix](ARCHITECTURE.md#state-ownership-matrix) — know where state lives
+- [Trust Model](ARCHITECTURE.md#frontend-trust-model) — understand what the frontend does and doesn't enforce
+- [Known Limitations](ARCHITECTURE.md#known-limitations) — avoid reintroducing documented constraints
 
 ## Review Process
-- All contributions will be reviewed by the project maintainer.
-- Feedback will be provided and changes may be requested.
-
-## License
-This project is proprietary and licensed under Ankit Soral's terms. Please respect the license and do not use the code without permission.
+All contributions are reviewed by the project maintainer. Feedback may be provided and changes requested.
