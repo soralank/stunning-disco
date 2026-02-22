@@ -296,6 +296,7 @@ This section documents what the user sees when things go wrong with the blockcha
 | **Paymaster underfunded** | Balance check vs. estimated cost | Warning badge on poll card: `"⚠ Paymaster underfunded"`. Gas budget status shown with voter capacity. | Franchisee/admin tops up paymaster balance. |
 | **Secret ballot reveal too early** | Contract revert during reveal | Status: `"Waiting for reveal phase to end..."`. Auto-reveal retries every 5 seconds. | Wait for reveal window to open, then retry. |
 | **Secret ballot reveal too late** | Reveal window expired | Console warning logged. **No prominent user notification** (see Known Limitations). | Vote is permanently lost. No recovery. |
+| **Metadata set after poll start** | `PollStarted()` revert | Status: error message shown. Metadata is immutable once the poll is active. | Set metadata between poll creation and poll start. |
 | **Poll load partial failure** | Individual poll fetch throws | Failed poll silently skipped. Other polls load normally. Console warning logged. | Refresh page to retry. |
 | **`missing revert data`** | Generic RPC error without reason | Status: "Poll may not be active or you may not be authorized." | Check poll status and voter authorization. |
 
@@ -314,6 +315,48 @@ Failures fall into three categories. The UI handles each differently:
 - Expired voting window → contract revert with clear error message
 - Insufficient paymaster funds → warning badge shown proactively, before voter attempts gasless vote
 - Reveal window closed → vote permanently lost (see Known Limitations §4)
+
+### IPFS Metadata
+
+Polls can have off-chain metadata stored on IPFS, referenced by a `metadataURI` string on-chain.
+
+**Flow:**
+1. Admin uploads file to IPFS → gets CID
+2. Admin calls `setPollMetadata(pollId, "ipfs://CID")` (must be before poll starts)
+3. Frontend resolves `ipfs://CID` → `REACT_APP_IPFS_GATEWAY + CID` via `resolveIpfsUri()` in `contract/index.js`
+4. Rendered as a clickable link on poll cards (VoteList, ResultsList, AdminPanel)
+
+**Constraints:**
+- Metadata is locked once the poll starts (`PollStarted()` revert)
+- The contract stores the URI as a plain string — no on-chain validation of content
+- Gateway resolution is client-side only; the `ipfs://` URI is stored on-chain for portability
+
+**IPFS Cluster setup** (docker-compose with Kubo + IPFS Cluster):
+- Cluster API (port 9094): for adding/pinning files (`POST /add`)
+- Kubo Gateway (port 8080 inside container): for fetching content (`GET /ipfs/CID`)
+- Map host port to container gateway: `"9090:8080"` in docker-compose
+- Use `127.0.0.1` (not `localhost`) to avoid Kubo's subdomain gateway redirect
+
+**IPFS Limitations:**
+- IPFS guarantees content integrity (CID), not availability.
+- If no node pins the content, metadata may become unreachable.
+- Production deployments should:
+  - Pin metadata via IPFS Cluster (multi-node redundancy)
+  - Use a pinning service (e.g. Pinata, web3.storage, Filebase)
+  - Maintain at least one always-on node pinning all poll metadata
+- The smart contract only stores the CID — it cannot guarantee persistence or availability of the off-chain content.
+
+### Gasless + Regular Vote Mixing
+
+Gasless and regular (gas-paying) votes can coexist in the same poll without issues. The contract functions (`vote`, `commitVote`, `revealVote`) are identical regardless of gas payment method. The paymaster only affects *who pays the transaction fee*, not the vote itself.
+
+### Auto-Reveal Gas Usage
+
+The auto-reveal timer (every 5 seconds) does **not consume gas** during retries:
+1. `hasRevealed()`, `hasCommitted()`, `polls()`, `getRevealDuration()` — all free read-only calls
+2. Time checks skip if reveal window not yet open
+3. Gas estimation failure (if any) also costs nothing
+4. Only a successful `revealVote()` transaction consumes gas
 
 **Network Errors** — caused by infrastructure or configuration:
 - Wrong chain ID → advisory warning (does not block — see Known Limitations §2)
@@ -450,6 +493,7 @@ The application operates in two distinct modes, determined by URL path and build
 | `REACT_APP_CHAIN_ID` | No | Skipped | Expected chain ID for verification |
 | `REACT_APP_REFRESH_INTERVAL` | No | Disabled | Auto-refresh interval (ms) |
 | `REACT_APP_HARDHAT_ACCOUNTS` | No | Hardcoded Hardhat defaults | JSON array of test account objects |
+| `REACT_APP_IPFS_GATEWAY` | No | — (ipfs:// shown as text) | IPFS gateway URL for resolving `ipfs://` metadata URIs (e.g. `http://127.0.0.1:9090/ipfs/`) |
 
 ### Provider Lifecycle
 
