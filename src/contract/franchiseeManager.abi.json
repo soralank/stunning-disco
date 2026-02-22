@@ -11,6 +11,121 @@
       "type": "constructor"
     },
     {
+      "inputs": [],
+      "name": "BadPaymaster",
+      "type": "error"
+    },
+    {
+      "inputs": [],
+      "name": "CannotSelfTransfer",
+      "type": "error"
+    },
+    {
+      "inputs": [],
+      "name": "ExceedsPollCap",
+      "type": "error"
+    },
+    {
+      "inputs": [],
+      "name": "FranchiseExhausted",
+      "type": "error"
+    },
+    {
+      "inputs": [],
+      "name": "FranchiseExpired",
+      "type": "error"
+    },
+    {
+      "inputs": [],
+      "name": "FranchiseNotFound",
+      "type": "error"
+    },
+    {
+      "inputs": [],
+      "name": "InsufficientFee",
+      "type": "error"
+    },
+    {
+      "inputs": [],
+      "name": "InvalidPollCount",
+      "type": "error"
+    },
+    {
+      "inputs": [],
+      "name": "NoFeesToWithdraw",
+      "type": "error"
+    },
+    {
+      "inputs": [],
+      "name": "NoFranchise",
+      "type": "error"
+    },
+    {
+      "inputs": [],
+      "name": "NoPlainEther",
+      "type": "error"
+    },
+    {
+      "inputs": [],
+      "name": "NoTransferPending",
+      "type": "error"
+    },
+    {
+      "inputs": [],
+      "name": "OnlyPendingOwner",
+      "type": "error"
+    },
+    {
+      "inputs": [],
+      "name": "OwnerCannotBeFranchisee",
+      "type": "error"
+    },
+    {
+      "inputs": [],
+      "name": "ReentrantCall",
+      "type": "error"
+    },
+    {
+      "inputs": [],
+      "name": "SameAddress",
+      "type": "error"
+    },
+    {
+      "inputs": [],
+      "name": "TargetHasActiveFranchise",
+      "type": "error"
+    },
+    {
+      "inputs": [],
+      "name": "TransferFailed",
+      "type": "error"
+    },
+    {
+      "inputs": [],
+      "name": "TransferPending",
+      "type": "error"
+    },
+    {
+      "inputs": [],
+      "name": "Unauthorized",
+      "type": "error"
+    },
+    {
+      "inputs": [],
+      "name": "UnknownFunction",
+      "type": "error"
+    },
+    {
+      "inputs": [],
+      "name": "ZeroAddress",
+      "type": "error"
+    },
+    {
+      "inputs": [],
+      "name": "ZeroAmount",
+      "type": "error"
+    },
+    {
       "anonymous": false,
       "inputs": [
         {

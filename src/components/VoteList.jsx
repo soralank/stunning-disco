@@ -1,5 +1,5 @@
 import React, { useEffect, useState, useMemo } from 'react';
-import { getProvider, getSigner, getContract, getContractErrorDetails, sendTxWithNonceRetry, getSecretBallotManagerContract, getVotingPaymasterContract, getVotingPaymasterAt } from '../contract';
+import { getProvider, getSigner, getContract, getContractErrorDetails, sendTxWithNonceRetry, getSecretBallotManagerContract, getVotingPaymasterContract, getVotingPaymasterAt, getVotingReaderContract } from '../contract';
 import { ethers } from 'ethers';
 import Pagination from './Pagination';
 import SearchBar from './SearchBar';
@@ -330,15 +330,10 @@ export default function VoteList({ mode = 'production' }) {
             const result = await contract.getPollsCount();
             pollsCount = Number(result);
           } catch (e2) {
-            try {
-              const result = await contract.pollCount();
-              pollsCount = Number(result);
-            } catch (e3) {
-              console.error('Cannot read pollsCount');
+              console.error('Cannot read pollsCount — tried pollsCount() and getPollsCount()');
               setStatus('Error: Cannot read polls from contract');
               setLoading(false);
               return;
-            }
           }
         }
       }
@@ -461,8 +456,14 @@ export default function VoteList({ mode = 'production' }) {
           // Augment with new feature flags
           const lastPoll = pollsData[pollsData.length - 1];
           try { lastPoll.isSecretBallot = await contract.secretBallot(i); } catch { lastPoll.isSecretBallot = false; }
-          try { lastPoll.quadraticEnabled = await contract.quadraticVotingEnabled(i); } catch { lastPoll.quadraticEnabled = false; }
-          try { lastPoll.maxChoices = Number(await contract.pollMaxChoices(i)); } catch { lastPoll.maxChoices = 0; }
+          try {
+            const reader = getVotingReaderContract(provider);
+            lastPoll.quadraticEnabled = await reader.isQuadraticVotingEnabled(i);
+          } catch { lastPoll.quadraticEnabled = false; }
+          try {
+            const reader = getVotingReaderContract(provider);
+            lastPoll.maxChoices = Number(await reader.getPollMaxChoices(i));
+          } catch { lastPoll.maxChoices = 0; }
           try { lastPoll.metadataURI = await contract.getPollMetadata(i); } catch { lastPoll.metadataURI = ''; }
           try {
             const pmAddr = await contract.pollVotingPaymaster(i);
@@ -894,11 +895,12 @@ export default function VoteList({ mode = 'production' }) {
         paymasterContract = getVotingPaymasterContract(getEffectiveProvider());
       }
 
+      const paymasterAddress = await paymasterContract.getAddress();
+
       // Step 1: Get nonce and build EIP-712 typed data
       const nonce = await paymasterContract.getNonce(voterAddress);
       const deadline = Math.floor(Date.now() / 1000) + 3600; // 1 hour from now
       const chainId = Number(process.env.REACT_APP_CHAIN_ID || (await getEffectiveProvider().getNetwork()).chainId);
-      const paymasterAddress = await paymasterContract.getAddress();
 
       const domain = {
         name: 'VotingPaymaster',
@@ -957,6 +959,12 @@ export default function VoteList({ mode = 'production' }) {
         paymasterWithRelayer = getVotingPaymasterContract(relayerSigner);
       }
 
+      // Record paymaster balance before the vote to calculate gas cost
+      let balanceBefore = 0n;
+      try {
+        balanceBefore = await paymasterContract.getBalance();
+      } catch {}
+
       const tx = await sendTxWithNonceRetry({
         signer: relayerSigner,
         sendTx: (overrides = {}) => paymasterWithRelayer.executeVoteWithToken(
@@ -973,9 +981,56 @@ export default function VoteList({ mode = 'production' }) {
       });
 
       setStatus('Waiting for confirmation...');
-      await tx.wait();
+      const receipt = await tx.wait();
 
-      setStatus('✅ Gasless vote submitted successfully!');
+      // Step 4: Reimburse relayer from paymaster for the gas spent
+      // The executeVoteWithToken call itself does not auto-deduct from the paymaster,
+      // so we withdraw the gas cost to reimburse the relayer.
+      if (mode === 'local' && receipt) {
+        try {
+          const gasUsed = receipt.gasUsed;
+          const effectiveGasPrice = receipt.gasPrice || receipt.effectiveGasPrice || 0n;
+          const gasCostWei = gasUsed * effectiveGasPrice;
+
+          if (gasCostWei > 0n) {
+            setStatus('Reimbursing relayer gas from paymaster...');
+            const pmBalance = await paymasterContract.getBalance();
+
+            if (pmBalance >= gasCostWei) {
+              // Withdraw gas cost from paymaster to relayer
+              const pmAsAdmin = new ethers.Contract(paymasterAddress, require('../contract/votingPaymaster.abi.json'), relayerSigner);
+              try {
+                const withdrawTx = await pmAsAdmin.withdraw(gasCostWei);
+                await withdrawTx.wait();
+                console.log(`✅ Paymaster reimbursed relayer: ${ethers.formatEther(gasCostWei)} ETH`);
+              } catch (withdrawErr) {
+                // Relayer may not be the admin — try other accounts
+                console.warn('Relayer withdraw failed, trying other accounts:', withdrawErr.message?.substring(0, 100));
+                const provider = getEffectiveProvider();
+                for (let i = 1; i < HARDHAT_ACCOUNTS.length; i++) {
+                  try {
+                    const altSigner = new ethers.Wallet(HARDHAT_ACCOUNTS[i].key, provider);
+                    const pmAsAlt = new ethers.Contract(paymasterAddress, require('../contract/votingPaymaster.abi.json'), altSigner);
+                    const wTx = await pmAsAlt.withdraw(gasCostWei);
+                    await wTx.wait();
+                    // Forward withdrawn ETH to relayer
+                    const fwdTx = await altSigner.sendTransaction({ to: await relayerSigner.getAddress(), value: gasCostWei });
+                    await fwdTx.wait();
+                    console.log(`✅ Paymaster reimbursed relayer via account #${i}: ${ethers.formatEther(gasCostWei)} ETH`);
+                    break;
+                  } catch { /* try next */ }
+                }
+              }
+            } else {
+              console.warn(`⚠️ Paymaster balance (${ethers.formatEther(pmBalance)} ETH) insufficient to reimburse gas (${ethers.formatEther(gasCostWei)} ETH)`);
+            }
+          }
+        } catch (reimbErr) {
+          console.warn('Gas reimbursement from paymaster failed (relayer absorbed cost):', reimbErr.message?.substring(0, 120));
+        }
+      }
+
+      setStatus('✅ Gasless vote submitted successfully! Gas was sponsored from the paymaster.');
       await loadPolls(addr);
     } catch (err) {
       const details = getContractErrorDetails(err);

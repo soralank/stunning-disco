@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useMemo } from 'react';
-import { getSigner, getContract, getProvider, getContractErrorDetails, sendTxWithNonceRetry, getSecretBallotManagerContract, getFranchiseManagerContract, getVotingPaymasterAt, deployVotingPaymaster } from '../contract';
+import { getSigner, getContract, getProvider, getContractErrorDetails, sendTxWithNonceRetry, getSecretBallotManagerContract, getFranchiseManagerContract, getVotingPaymasterAt, deployVotingPaymaster, getVotingReaderContract } from '../contract';
 import { ethers } from 'ethers';
 import Pagination from './Pagination';
 import SearchBar from './SearchBar';
@@ -318,13 +318,9 @@ export default function AdminPanel({ mode = 'production', role }) {
             const result = await contract.pollsCount();
             pollsCount = Number(result);
           } catch (e2) {
-            try {
-              const result = await contract.pollCount();
-              pollsCount = Number(result);
-            } catch (e3) {
               console.error('Cannot read pollsCount from contract');
-              console.error('Tried: pollsCount(), getPollsCount(), pollCount()');
-              console.error('Last error:', e3.message);
+              console.error('Tried: getPollsCount(), pollsCount()');
+              console.error('Last error:', e2.message);
               
               // Check if contract is deployed
               const code = await provider.getCode(contract.target);
@@ -339,7 +335,6 @@ export default function AdminPanel({ mode = 'production', role }) {
                 console.error('3. Hardhat node was restarted (old address invalid)');
                 pollsCount = 0; // Treat as no polls
               }
-            }
           }
         }
       }
@@ -479,8 +474,14 @@ export default function AdminPanel({ mode = 'production', role }) {
               lastPoll.sbStatus = { commits: 0, reveals: 0, isSecretBallot: true, inCommitPhase: false, inRevealPhase: false };
             }
           }
-          try { lastPoll.quadraticEnabled = await contract.quadraticVotingEnabled(i); } catch { lastPoll.quadraticEnabled = false; }
-          try { lastPoll.maxChoices = Number(await contract.pollMaxChoices(i)); } catch { lastPoll.maxChoices = 0; }
+          try {
+            const reader = getVotingReaderContract(provider);
+            lastPoll.quadraticEnabled = await reader.isQuadraticVotingEnabled(i);
+          } catch { lastPoll.quadraticEnabled = false; }
+          try {
+            const reader = getVotingReaderContract(provider);
+            lastPoll.maxChoices = Number(await reader.getPollMaxChoices(i));
+          } catch { lastPoll.maxChoices = 0; }
           try { lastPoll.delegationEnabled = await contract.delegationEnabled(i); } catch { lastPoll.delegationEnabled = false; }
           try { lastPoll.metadataURI = await contract.getPollMetadata(i); } catch { lastPoll.metadataURI = ''; }
         } catch (pollErr) {

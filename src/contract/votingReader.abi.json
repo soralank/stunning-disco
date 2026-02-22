@@ -12,6 +12,11 @@
     },
     {
       "inputs": [],
+      "name": "ZeroAddress",
+      "type": "error"
+    },
+    {
+      "inputs": [],
       "name": "electionsManager",
       "outputs": [
         {

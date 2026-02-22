@@ -5,6 +5,236 @@
       "type": "constructor"
     },
     {
+      "inputs": [],
+      "name": "AlreadyVoted",
+      "type": "error"
+    },
+    {
+      "inputs": [],
+      "name": "ArrayLengthMismatch",
+      "type": "error"
+    },
+    {
+      "inputs": [],
+      "name": "BadPaymaster",
+      "type": "error"
+    },
+    {
+      "inputs": [],
+      "name": "BatchLimitExceeded",
+      "type": "error"
+    },
+    {
+      "inputs": [],
+      "name": "DelegateAlreadyVoted",
+      "type": "error"
+    },
+    {
+      "inputs": [],
+      "name": "DelegateeNotAuthorized",
+      "type": "error"
+    },
+    {
+      "inputs": [],
+      "name": "DelegationClosed",
+      "type": "error"
+    },
+    {
+      "inputs": [],
+      "name": "DelegationDisabled",
+      "type": "error"
+    },
+    {
+      "inputs": [],
+      "name": "DuplicateName",
+      "type": "error"
+    },
+    {
+      "inputs": [],
+      "name": "DuplicateTitle",
+      "type": "error"
+    },
+    {
+      "inputs": [],
+      "name": "DuplicateVoter",
+      "type": "error"
+    },
+    {
+      "inputs": [],
+      "name": "DurationTooShort",
+      "type": "error"
+    },
+    {
+      "inputs": [],
+      "name": "EmptyArray",
+      "type": "error"
+    },
+    {
+      "inputs": [],
+      "name": "InfraLocked",
+      "type": "error"
+    },
+    {
+      "inputs": [],
+      "name": "InsufficientTokens",
+      "type": "error"
+    },
+    {
+      "inputs": [],
+      "name": "InvalidOption",
+      "type": "error"
+    },
+    {
+      "inputs": [],
+      "name": "MaxOptionsReached",
+      "type": "error"
+    },
+    {
+      "inputs": [],
+      "name": "NoDelegationForTokenPolls",
+      "type": "error"
+    },
+    {
+      "inputs": [],
+      "name": "NoPlainEther",
+      "type": "error"
+    },
+    {
+      "inputs": [],
+      "name": "NoTokenManager",
+      "type": "error"
+    },
+    {
+      "inputs": [],
+      "name": "NotSecretBallot",
+      "type": "error"
+    },
+    {
+      "inputs": [],
+      "name": "NotVoter",
+      "type": "error"
+    },
+    {
+      "inputs": [],
+      "name": "OnlyPendingOwner",
+      "type": "error"
+    },
+    {
+      "inputs": [],
+      "name": "PollAlreadyRevealed",
+      "type": "error"
+    },
+    {
+      "inputs": [],
+      "name": "PollEnded",
+      "type": "error"
+    },
+    {
+      "inputs": [],
+      "name": "PollNotActive",
+      "type": "error"
+    },
+    {
+      "inputs": [],
+      "name": "PollNotEnded",
+      "type": "error"
+    },
+    {
+      "inputs": [],
+      "name": "PollNotFound",
+      "type": "error"
+    },
+    {
+      "inputs": [],
+      "name": "PollNotRevealed",
+      "type": "error"
+    },
+    {
+      "inputs": [],
+      "name": "PollStarted",
+      "type": "error"
+    },
+    {
+      "inputs": [],
+      "name": "ReentrantCall",
+      "type": "error"
+    },
+    {
+      "inputs": [],
+      "name": "RevealPeriodActive",
+      "type": "error"
+    },
+    {
+      "inputs": [],
+      "name": "SBMNotSet",
+      "type": "error"
+    },
+    {
+      "inputs": [],
+      "name": "SameAddress",
+      "type": "error"
+    },
+    {
+      "inputs": [],
+      "name": "SecretBallotAlreadyEnabled",
+      "type": "error"
+    },
+    {
+      "inputs": [],
+      "name": "SecretPoll",
+      "type": "error"
+    },
+    {
+      "inputs": [],
+      "name": "StartTimeInPast",
+      "type": "error"
+    },
+    {
+      "inputs": [],
+      "name": "StartTimeTooFarInFuture",
+      "type": "error"
+    },
+    {
+      "inputs": [],
+      "name": "TimeOverflow",
+      "type": "error"
+    },
+    {
+      "inputs": [],
+      "name": "TokenVotingNotEnabled",
+      "type": "error"
+    },
+    {
+      "inputs": [],
+      "name": "TokenVotingRequired",
+      "type": "error"
+    },
+    {
+      "inputs": [],
+      "name": "Unauthorized",
+      "type": "error"
+    },
+    {
+      "inputs": [],
+      "name": "UnknownFunction",
+      "type": "error"
+    },
+    {
+      "inputs": [],
+      "name": "VoteIsDelegated",
+      "type": "error"
+    },
+    {
+      "inputs": [],
+      "name": "ZeroAddress",
+      "type": "error"
+    },
+    {
+      "inputs": [],
+      "name": "ZeroAmount",
+      "type": "error"
+    },
+    {
       "anonymous": false,
       "inputs": [
         {

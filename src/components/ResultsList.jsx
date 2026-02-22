@@ -1,5 +1,5 @@
 import React, { useEffect, useState, useMemo } from 'react';
-import { getProvider, getContract, getSecretBallotManagerContract } from '../contract';
+import { getProvider, getContract, getSecretBallotManagerContract, getVotingReaderContract } from '../contract';
 import { ethers } from 'ethers';
 import Pagination from './Pagination';
 import SearchBar from './SearchBar';
@@ -65,14 +65,10 @@ export default function ResultsList({ mode = 'production' }) {
             const result = await contract.pollsCount();
             pollsCount = Number(result);
           } catch (e2) {
-            try {
-              const result = await contract.pollCount();
-              pollsCount = Number(result);
-            } catch (e3) {
+              console.error('Cannot read pollsCount — tried getPollsCount() and pollsCount()');
               setStatus('Error: Cannot read polls from contract');
               setLoading(false);
               return;
-            }
           }
         }
       }
@@ -172,8 +168,14 @@ export default function ResultsList({ mode = 'production' }) {
           // Augment with new feature flags
           const lastResult = results[results.length - 1];
           try { lastResult.isSecretBallot = await contract.secretBallot(i); } catch { lastResult.isSecretBallot = false; }
-          try { lastResult.quadraticEnabled = await contract.quadraticVotingEnabled(i); } catch { lastResult.quadraticEnabled = false; }
-          try { lastResult.maxChoices = Number(await contract.pollMaxChoices(i)); } catch { lastResult.maxChoices = 0; }
+          try {
+            const reader = getVotingReaderContract(provider);
+            lastResult.quadraticEnabled = await reader.isQuadraticVotingEnabled(i);
+          } catch { lastResult.quadraticEnabled = false; }
+          try {
+            const reader = getVotingReaderContract(provider);
+            lastResult.maxChoices = Number(await reader.getPollMaxChoices(i));
+          } catch { lastResult.maxChoices = 0; }
           try { lastResult.delegationEnabled = await contract.delegationEnabled(i); } catch { lastResult.delegationEnabled = false; }
           try { lastResult.metadataURI = await contract.getPollMetadata(i); } catch { lastResult.metadataURI = ''; }
 
