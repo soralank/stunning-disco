@@ -25,6 +25,10 @@ If enabled by your poll admin, click **⛽ Vote Gasless** — no gas fees requir
 
 > **Critical:** Do not clear browser storage before revealing. Your vote salt is stored only in your browser. If lost, your vote is permanently irrecoverable. See [ARCHITECTURE.md § The Salt Problem](ARCHITECTURE.md#critical-insight-the-salt-problem).
 
+## Poll Metadata
+- Some polls include a 📎 Metadata link with additional information (description, rules, candidate details).
+- Click the link to view the full metadata in a new tab.
+
 ## Results
 - Once votes are revealed, results display automatically with winner and tie detection.
 
