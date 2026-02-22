@@ -108,6 +108,63 @@ export default function VoteList({ mode = 'production' }) {
     return new ethers.Wallet(account.key, provider);
   }
 
+  // ── Helper: withdraw from paymaster using its admin account ──
+  // Queries paymasterContract.admin() to find the right signer, then withdraws.
+  // Returns { success: boolean, adminAddress: string|null }
+  async function _withdrawFromPaymasterAsAdmin(paymasterAddress, amount, relayerSigner) {
+    const pmAbi = require('../contract/votingPaymaster.abi.json');
+    const provider = getEffectiveProvider();
+
+    // 1) Query who the paymaster admin is
+    const pmReadOnly = new ethers.Contract(paymasterAddress, pmAbi, provider);
+    let adminAddr;
+    try {
+      adminAddr = await pmReadOnly.admin();
+    } catch (err) {
+      console.warn('Could not query paymaster admin():', err.message?.substring(0, 100));
+      return { success: false, adminAddress: null };
+    }
+
+    console.log(`Paymaster admin is: ${adminAddr}`);
+
+    // 2) Find matching Hardhat account key for the admin
+    const adminAccount = HARDHAT_ACCOUNTS.find(
+      a => a.address.toLowerCase() === adminAddr.toLowerCase()
+    );
+
+    if (!adminAccount) {
+      console.error(`❌ Paymaster admin ${adminAddr} not found in HARDHAT_ACCOUNTS — cannot withdraw. Relayer will absorb cost.`);
+      return { success: false, adminAddress: adminAddr };
+    }
+
+    // 3) Withdraw as admin
+    const adminSigner = new ethers.Wallet(adminAccount.key, provider);
+    const pmAsAdmin = new ethers.Contract(paymasterAddress, pmAbi, adminSigner);
+    try {
+      const withdrawTx = await pmAsAdmin.withdraw(amount);
+      await withdrawTx.wait();
+      console.log(`✅ Withdrew ${ethers.formatEther(amount)} ETH from paymaster as admin (${adminAccount.name})`);
+    } catch (withdrawErr) {
+      console.error(`❌ Paymaster withdraw failed as admin ${adminAddr}:`, withdrawErr.message?.substring(0, 200));
+      return { success: false, adminAddress: adminAddr };
+    }
+
+    // 4) If admin is not the relayer, forward the ETH to the relayer
+    const relayerAddress = await relayerSigner.getAddress();
+    if (adminAddr.toLowerCase() !== relayerAddress.toLowerCase()) {
+      try {
+        const fwdTx = await adminSigner.sendTransaction({ to: relayerAddress, value: amount });
+        await fwdTx.wait();
+        console.log(`✅ Forwarded ${ethers.formatEther(amount)} ETH from admin → relayer`);
+      } catch (fwdErr) {
+        console.error('Failed to forward ETH from admin to relayer:', fwdErr.message?.substring(0, 100));
+        return { success: false, adminAddress: adminAddr };
+      }
+    }
+
+    return { success: true, adminAddress: adminAddr };
+  }
+
   // ── Reveal a single secret ballot vote (used by auto-reveal and manual button) ──
   async function revealSecretVote(pollId, optionId, salt, voterAddr) {
     // Get the right signer: if local mode, use the matching Hardhat account
@@ -373,7 +430,8 @@ export default function VoteList({ mode = 'production' }) {
               enabled: pollTokenEnabled && (rawTokenConfig?.enabled ?? rawTokenConfig?.[0] ?? false),
               tokenRequired: pollTokenRequired && (rawTokenConfig?.tokenRequired ?? rawTokenConfig?.[1] ?? false),
               tokensPerVoter: pollTokenEnabled ? Number(rawTokenConfig?.tokensPerVoter ?? rawTokenConfig?.[2] ?? 0) : 0,
-              allowGaslessVoting: pollTokenEnabled ? (rawTokenConfig?.allowGaslessVoting ?? rawTokenConfig?.[3] ?? false) : false
+              // Gasless is independent of token voting — read it directly from the config
+              allowGaslessVoting: rawTokenConfig?.allowGaslessVoting ?? rawTokenConfig?.[3] ?? false
             };
           } catch {
             // If getTokenConfig fails, fall back to poll struct flags with safe defaults
@@ -812,45 +870,17 @@ export default function VoteList({ mode = 'production' }) {
         const globalPm = getVotingPaymasterContract(getEffectiveProvider());
         paymasterAddr = await globalPm.getAddress();
       }
-      const pmAbi = require('../contract/votingPaymaster.abi.json');
 
       if (mode === 'local') {
-        // In local mode, use the relayer (account #0) to:
-        // 1) Withdraw gas cost from paymaster (as paymaster deployer/owner)
-        // 2) Forward that ETH to the voter
+        // In local mode, use the relayer (account #0) to forward gas to voter.
+        // Withdraw from paymaster using its admin account.
         const provider = getEffectiveProvider();
         const relayerKey = HARDHAT_ACCOUNTS[0]?.key;
         const relayerSigner = relayerKey
           ? new ethers.Wallet(relayerKey, provider)
           : await provider.getSigner(0);
 
-        // Try to withdraw from paymaster. The deployer of the paymaster can withdraw.
-        // If that fails (access control), the relayer just sends from its own funds.
-        let sponsoredFromPaymaster = false;
-        try {
-          const pmAsRelayer = new ethers.Contract(paymasterAddr, pmAbi, relayerSigner);
-          const withdrawTx = await pmAsRelayer.withdraw(gasCostWei);
-          await withdrawTx.wait();
-          sponsoredFromPaymaster = true;
-        } catch (withdrawErr) {
-          console.warn('Paymaster withdraw failed (will use relayer funds):', withdrawErr.message?.substring(0, 100));
-          // Try as the franchisee (account #2) who deployed the paymaster
-          try {
-            for (let i = 1; i < HARDHAT_ACCOUNTS.length; i++) {
-              try {
-                const fSigner = new ethers.Wallet(HARDHAT_ACCOUNTS[i].key, provider);
-                const pmAsFranchisee = new ethers.Contract(paymasterAddr, pmAbi, fSigner);
-                const withdrawTx = await pmAsFranchisee.withdraw(gasCostWei);
-                await withdrawTx.wait();
-                // Send withdrawn ETH from franchisee to relayer so relayer can forward to voter
-                const fwdTx = await fSigner.sendTransaction({ to: await relayerSigner.getAddress(), value: gasCostWei });
-                await fwdTx.wait();
-                sponsoredFromPaymaster = true;
-                break;
-              } catch { /* try next account */ }
-            }
-          } catch {}
-        }
+        const { success: sponsoredFromPaymaster } = await _withdrawFromPaymasterAsAdmin(paymasterAddr, gasCostWei, relayerSigner);
 
         // Send gas cost to voter (relayer pays, funded from paymaster withdrawal or relayer's own balance)
         const sendGasTx = await relayerSigner.sendTransaction({
@@ -888,12 +918,13 @@ export default function VoteList({ mode = 'production' }) {
     }
   }
 
-  // ─── Gasless Voting (EIP-712 Meta-Transaction) ────────────────────────────
+  // ─── Gasless Voting (EIP-712 Meta-Transaction or relayer-sponsored) ─────
   async function voteGasless(pollId, optionId) {
     setStatus(null);
     try {
       const signer = walletSigner || await getSigner();
       const voterAddress = await signer.getAddress();
+      const contract = getContract(signer);
 
       // Use per-poll paymaster if set, otherwise global default
       const currentPoll = polls.find(p => Number(p.id) === Number(pollId));
@@ -906,137 +937,135 @@ export default function VoteList({ mode = 'production' }) {
 
       const paymasterAddress = await paymasterContract.getAddress();
 
-      // Step 1: Get nonce and build EIP-712 typed data
-      const nonce = await paymasterContract.getNonce(voterAddress);
-      const deadline = Math.floor(Date.now() / 1000) + 3600; // 1 hour from now
-      const chainId = Number(process.env.REACT_APP_CHAIN_ID || (await getEffectiveProvider().getNetwork()).chainId);
-
-      const domain = {
-        name: 'VotingPaymaster',
-        version: '1',
-        chainId,
-        verifyingContract: paymasterAddress,
-      };
-
-      const types = {
-        VoteWithToken: [
-          { name: 'pollId', type: 'uint256' },
-          { name: 'optionId', type: 'uint256' },
-          { name: 'voter', type: 'address' },
-          { name: 'nonce', type: 'uint256' },
-          { name: 'deadline', type: 'uint256' },
-        ],
-      };
-
-      const value = {
-        pollId: BigInt(pollId),
-        optionId: BigInt(optionId),
-        voter: voterAddress,
-        nonce,
-        deadline: BigInt(deadline),
-      };
-
-      // Step 2: Voter signs EIP-712 typed data (no gas cost)
-      setStatus('Sign the gasless vote in your wallet (no gas cost)...');
-      const signature = await signer.signTypedData(domain, types, value);
-      const sig = ethers.Signature.from(signature);
-
-      // Step 3: Submit via relayer
-      // In local mode, use Account #0 (owner) as the relayer
-      // In production, this would be sent to a relayer API
-      setStatus('Submitting gasless vote via relayer...');
-      let relayerSigner;
-
-      if (mode === 'local') {
-        const provider = getEffectiveProvider();
-        const ownerKey = HARDHAT_ACCOUNTS[0]?.key;
-        if (ownerKey) {
-          relayerSigner = new ethers.Wallet(ownerKey, provider);
-        } else {
-          relayerSigner = await provider.getSigner(0);
-        }
-      } else {
-        // In production: self-relay (voter pays gas for the executeVoteWithToken call)
-        // In a real deployment, this would POST to a relayer backend
-        relayerSigner = signer;
-      }
-
-      let paymasterWithRelayer;
-      if (currentPoll?.pollPaymaster) {
-        paymasterWithRelayer = getVotingPaymasterAt(currentPoll.pollPaymaster, relayerSigner);
-      } else {
-        paymasterWithRelayer = getVotingPaymasterContract(relayerSigner);
-      }
-
-      // Record paymaster balance before the vote to calculate gas cost
-      let balanceBefore = 0n;
+      // Detect whether token voting is enabled for this poll
+      // The paymaster's executeVoteWithToken only works when token voting is on.
+      // For non-token polls, we sponsor gas to the voter and they call voteInPoll directly.
+      let isTokenEnabled = Boolean(currentPoll?.tokenConfig?.enabled);
       try {
-        balanceBefore = await paymasterContract.getBalance();
+        const rawPoll = await contract.polls(pollId);
+        const pEnabled = Boolean(rawPoll?.tokenVotingEnabled ?? rawPoll?.[9] ?? false);
+        if (pEnabled) isTokenEnabled = true;
+        if (!pEnabled) isTokenEnabled = false; // poll struct is the source of truth
       } catch {}
 
-      const tx = await sendTxWithNonceRetry({
-        signer: relayerSigner,
-        sendTx: (overrides = {}) => paymasterWithRelayer.executeVoteWithToken(
-          pollId,
-          optionId,
-          voterAddress,
-          deadline,
-          sig.v,
-          sig.r,
-          sig.s,
-          overrides
-        ),
-        onRetry: () => setStatus('Retrying gasless vote relay...')
-      });
+      if (isTokenEnabled) {
+        // ── Token-enabled poll: use paymaster's executeVoteWithToken (EIP-712) ──
+        const nonce = await paymasterContract.getNonce(voterAddress);
+        const deadline = Math.floor(Date.now() / 1000) + 3600;
+        const chainId = Number(process.env.REACT_APP_CHAIN_ID || (await getEffectiveProvider().getNetwork()).chainId);
 
-      setStatus('Waiting for confirmation...');
-      const receipt = await tx.wait();
+        const domain = {
+          name: 'VotingPaymaster',
+          version: '1',
+          chainId,
+          verifyingContract: paymasterAddress,
+        };
 
-      // Step 4: Reimburse relayer from paymaster for the gas spent
-      // The executeVoteWithToken call itself does not auto-deduct from the paymaster,
-      // so we withdraw the gas cost to reimburse the relayer.
-      if (mode === 'local' && receipt) {
-        try {
-          const gasUsed = receipt.gasUsed;
-          const effectiveGasPrice = receipt.gasPrice || receipt.effectiveGasPrice || 0n;
-          const gasCostWei = gasUsed * effectiveGasPrice;
+        const types = {
+          VoteWithToken: [
+            { name: 'pollId', type: 'uint256' },
+            { name: 'optionId', type: 'uint256' },
+            { name: 'voter', type: 'address' },
+            { name: 'nonce', type: 'uint256' },
+            { name: 'deadline', type: 'uint256' },
+          ],
+        };
 
-          if (gasCostWei > 0n) {
-            setStatus('Reimbursing relayer gas from paymaster...');
-            const pmBalance = await paymasterContract.getBalance();
+        const value = {
+          pollId: BigInt(pollId),
+          optionId: BigInt(optionId),
+          voter: voterAddress,
+          nonce,
+          deadline: BigInt(deadline),
+        };
 
-            if (pmBalance >= gasCostWei) {
-              // Withdraw gas cost from paymaster to relayer
-              const pmAsAdmin = new ethers.Contract(paymasterAddress, require('../contract/votingPaymaster.abi.json'), relayerSigner);
-              try {
-                const withdrawTx = await pmAsAdmin.withdraw(gasCostWei);
-                await withdrawTx.wait();
-                console.log(`✅ Paymaster reimbursed relayer: ${ethers.formatEther(gasCostWei)} ETH`);
-              } catch (withdrawErr) {
-                // Relayer may not be the admin — try other accounts
-                console.warn('Relayer withdraw failed, trying other accounts:', withdrawErr.message?.substring(0, 100));
-                const provider = getEffectiveProvider();
-                for (let i = 1; i < HARDHAT_ACCOUNTS.length; i++) {
-                  try {
-                    const altSigner = new ethers.Wallet(HARDHAT_ACCOUNTS[i].key, provider);
-                    const pmAsAlt = new ethers.Contract(paymasterAddress, require('../contract/votingPaymaster.abi.json'), altSigner);
-                    const wTx = await pmAsAlt.withdraw(gasCostWei);
-                    await wTx.wait();
-                    // Forward withdrawn ETH to relayer
-                    const fwdTx = await altSigner.sendTransaction({ to: await relayerSigner.getAddress(), value: gasCostWei });
-                    await fwdTx.wait();
-                    console.log(`✅ Paymaster reimbursed relayer via account #${i}: ${ethers.formatEther(gasCostWei)} ETH`);
-                    break;
-                  } catch { /* try next */ }
-                }
-              }
-            } else {
-              console.warn(`⚠️ Paymaster balance (${ethers.formatEther(pmBalance)} ETH) insufficient to reimburse gas (${ethers.formatEther(gasCostWei)} ETH)`);
-            }
-          }
-        } catch (reimbErr) {
-          console.warn('Gas reimbursement from paymaster failed (relayer absorbed cost):', reimbErr.message?.substring(0, 120));
+        setStatus('Sign the gasless vote in your wallet (no gas cost)...');
+        const signature = await signer.signTypedData(domain, types, value);
+        const sig = ethers.Signature.from(signature);
+
+        setStatus('Submitting gasless vote via relayer...');
+        let relayerSigner;
+
+        if (mode === 'local') {
+          const provider = getEffectiveProvider();
+          const ownerKey = HARDHAT_ACCOUNTS[0]?.key;
+          relayerSigner = ownerKey
+            ? new ethers.Wallet(ownerKey, provider)
+            : await provider.getSigner(0);
+        } else {
+          relayerSigner = signer;
         }
+
+        let paymasterWithRelayer;
+        if (currentPoll?.pollPaymaster) {
+          paymasterWithRelayer = getVotingPaymasterAt(currentPoll.pollPaymaster, relayerSigner);
+        } else {
+          paymasterWithRelayer = getVotingPaymasterContract(relayerSigner);
+        }
+
+        const tx = await sendTxWithNonceRetry({
+          signer: relayerSigner,
+          sendTx: (overrides = {}) => paymasterWithRelayer.executeVoteWithToken(
+            pollId, optionId, voterAddress, deadline,
+            sig.v, sig.r, sig.s, overrides
+          ),
+          onRetry: () => setStatus('Retrying gasless vote relay...')
+        });
+
+        setStatus('Waiting for confirmation...');
+        const receipt = await tx.wait();
+
+        // Reimburse relayer from paymaster
+        if (mode === 'local' && receipt) {
+          await _reimburseRelayerFromPaymaster(paymasterContract, paymasterAddress, relayerSigner, receipt);
+        }
+
+      } else {
+        // ── Non-token poll: sponsor gas to voter, voter calls voteInPoll directly ──
+        setStatus('Estimating gas for vote...');
+
+        let gasEstimate;
+        try {
+          gasEstimate = await contract.voteInPoll.estimateGas(pollId, optionId);
+        } catch {
+          gasEstimate = 200000n;
+        }
+        const gasNeeded = gasEstimate * 130n / 100n;
+        const feeData = await getEffectiveProvider().getFeeData();
+        const gasPrice = feeData.gasPrice || ethers.parseUnits('2', 'gwei');
+        const gasCostWei = gasNeeded * gasPrice;
+
+        setStatus('Sponsoring gas from paymaster...');
+
+        if (mode === 'local') {
+          const provider = getEffectiveProvider();
+          const relayerKey = HARDHAT_ACCOUNTS[0]?.key;
+          const relayerSigner = relayerKey
+            ? new ethers.Wallet(relayerKey, provider)
+            : await provider.getSigner(0);
+
+          // Withdraw gas cost from paymaster using its admin account
+          const { success: sponsoredFromPaymaster } = await _withdrawFromPaymasterAsAdmin(paymasterAddress, gasCostWei, relayerSigner);
+
+          // Fund the voter so they can pay gas
+          const sendGasTx = await relayerSigner.sendTransaction({ to: voterAddress, value: gasCostWei });
+          await sendGasTx.wait();
+
+          setStatus(sponsoredFromPaymaster
+            ? `Gas sponsored from paymaster (${ethers.formatEther(gasCostWei)} ETH). Submitting vote...`
+            : `Gas sponsored by relayer (${ethers.formatEther(gasCostWei)} ETH). Submitting vote...`
+          );
+        } else {
+          setStatus('Submitting gasless vote...');
+        }
+
+        // Voter calls voteInPoll directly (now has ETH for gas)
+        const tx = await sendTxWithNonceRetry({
+          signer,
+          sendTx: (overrides = {}) => contract.voteInPoll(pollId, optionId, overrides),
+          onRetry: () => setStatus('Retrying vote...')
+        });
+        await tx.wait();
       }
 
       setStatus('✅ Gasless vote submitted successfully! Gas was sponsored from the paymaster.');
@@ -1044,6 +1073,29 @@ export default function VoteList({ mode = 'production' }) {
     } catch (err) {
       const details = getContractErrorDetails(err);
       setStatus(`Error: ${details.description}`);
+    }
+  }
+
+  // Helper: reimburse relayer from paymaster after a gasless tx
+  async function _reimburseRelayerFromPaymaster(paymasterContract, paymasterAddress, relayerSigner, receipt) {
+    try {
+      const gasUsed = receipt.gasUsed;
+      const effectiveGasPrice = receipt.gasPrice || receipt.effectiveGasPrice || 0n;
+      const gasCostWei = gasUsed * effectiveGasPrice;
+
+      if (gasCostWei > 0n) {
+        const pmBalance = await paymasterContract.getBalance();
+        if (pmBalance >= gasCostWei) {
+          const { success } = await _withdrawFromPaymasterAsAdmin(paymasterAddress, gasCostWei, relayerSigner);
+          if (!success) {
+            console.warn('⚠️ Paymaster reimbursement failed — relayer absorbed gas cost');
+          }
+        } else {
+          console.warn(`⚠️ Paymaster balance (${ethers.formatEther(pmBalance)} ETH) insufficient to reimburse gas (${ethers.formatEther(gasCostWei)} ETH)`);
+        }
+      }
+    } catch (reimbErr) {
+      console.warn('Gas reimbursement from paymaster failed (relayer absorbed cost):', reimbErr.message?.substring(0, 120));
     }
   }
 
@@ -1600,7 +1652,7 @@ export default function VoteList({ mode = 'production' }) {
                                 <button className="btn" onClick={() => commitSecretVote(poll.id, option.id)}>
                                   Vote
                                 </button>
-                                {poll.tokenConfig?.allowGaslessVoting && poll.tokenConfig?.enabled && (
+                                {poll.tokenConfig?.allowGaslessVoting && (
                                   <button className="btn secondary" onClick={() => commitSecretVoteGasless(poll.id, option.id)}>
                                     ⛽ Vote Gasless
                                   </button>
@@ -1737,7 +1789,7 @@ export default function VoteList({ mode = 'production' }) {
                                   <button className="btn" onClick={() => vote(poll.id, option.id)}>
                                     {poll.tokenConfig?.tokenRequired ? 'Vote with Token' : 'Vote'}
                                   </button>
-                                  {poll.tokenConfig?.allowGaslessVoting && poll.tokenConfig?.enabled && (
+                                  {poll.tokenConfig?.allowGaslessVoting && (
                                     <button className="btn secondary" onClick={() => voteGasless(poll.id, option.id)}>
                                       ⛽ Vote Gasless
                                     </button>

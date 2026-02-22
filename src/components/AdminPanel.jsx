@@ -374,7 +374,8 @@ export default function AdminPanel({ mode = 'production', role }) {
               enabled: pollTokenEnabled && (rawTokenConfig?.enabled ?? rawTokenConfig?.[0] ?? false),
               tokenRequired: pollTokenRequired && (rawTokenConfig?.tokenRequired ?? rawTokenConfig?.[1] ?? false),
               tokensPerVoter: pollTokenEnabled ? Number(rawTokenConfig?.tokensPerVoter ?? rawTokenConfig?.[2] ?? 0) : 0,
-              allowGaslessVoting: pollTokenEnabled ? (rawTokenConfig?.allowGaslessVoting ?? rawTokenConfig?.[3] ?? false) : false
+              // Gasless is independent of token voting — read it directly from the config
+              allowGaslessVoting: rawTokenConfig?.allowGaslessVoting ?? rawTokenConfig?.[3] ?? false
             };
           } catch {
             // If getTokenConfig fails, fall back to poll struct flags with safe defaults
@@ -810,20 +811,20 @@ export default function AdminPanel({ mode = 'production', role }) {
         const parsed = contract.interface.parseLog(event);
         const pollId = parsed.args[0];
 
-        // Configure token voting if enabled
-        if (enableTokenVoting) {
-          setStatus('Configuring token voting...');
+        // Configure token voting / gasless if either is enabled
+        if (enableTokenVoting || allowGaslessVoting) {
+          setStatus(enableTokenVoting ? 'Configuring token voting...' : 'Configuring gasless voting...');
           const configureTx = await sendTxWithNonceRetry({
             signer,
             sendTx: (overrides = {}) => contract.configureTokenVoting(
               pollId,
-              true,
+              enableTokenVoting,
               requireTokenVoting,
-              parsedTokensPerVoter,
+              enableTokenVoting ? parsedTokensPerVoter : 0,
               allowGaslessVoting,
               overrides
             ),
-            onRetry: () => setStatus('Nonce conflict detected, retrying token config...')
+            onRetry: () => setStatus('Nonce conflict detected, retrying config...')
           });
           await configureTx.wait();
         }
@@ -862,8 +863,12 @@ export default function AdminPanel({ mode = 'production', role }) {
         setStatus(
           revealMins > 0
             ? `✅ Poll created with secret ballot (${revealMins} min reveal window)! ID: ${pollId}`
+            : enableTokenVoting && allowGaslessVoting
+            ? `✅ Poll created with token + gasless voting! ID: ${pollId}`
             : enableTokenVoting
             ? `✅ Poll created and token voting configured! ID: ${pollId}`
+            : allowGaslessVoting
+            ? `✅ Poll created with gasless voting! ID: ${pollId}. Make sure your paymaster is funded.`
             : `✅ Poll created! ID: ${pollId}. Next: add candidates and authorize voters in the Candidates & Voters tab before the poll starts.`
         );
       } else {
@@ -1493,7 +1498,13 @@ export default function AdminPanel({ mode = 'production', role }) {
       }
       await loadPolls();
     } catch (err) {
-      setStatus(`Error: ${getContractErrorDetails(err).description}`);
+      const details = getContractErrorDetails(err);
+      const msg = details.rawMessage || details.description || '';
+      if (msg.includes('PollStarted') || details.normalizedCode === 'POLL_STARTED') {
+        setStatus('Error: This poll has already started. Secret ballot must be enabled before the poll starts. Tip: When creating a poll, set the start time further in the future, or use the "Reveal Duration" field during poll creation to enable secret ballot automatically.');
+      } else {
+        setStatus(`Error: ${details.description}`);
+      }
     } finally { setLoading(false); }
   }
 
@@ -1954,10 +1965,10 @@ export default function AdminPanel({ mode = 'production', role }) {
         }
       }
 
-      // Configure token voting (gasless, tokens per voter) if enabled
+      // Configure token voting / gasless voting if either is enabled
       let tokenConfigSuccess = true;
-      if (fpEnableToken && newPollId != null) {
-        setStatus('Configuring token voting...');
+      if ((fpEnableToken || fpAllowGasless) && newPollId != null) {
+        setStatus(fpEnableToken ? 'Configuring token voting...' : 'Configuring gasless voting...');
         const emContract = getContract(signer);
 
         // Try configureTokenVoting as the current signer first
@@ -1967,13 +1978,13 @@ export default function AdminPanel({ mode = 'production', role }) {
             signer,
             sendTx: (overrides = {}) => emContract.configureTokenVoting(
               newPollId,
-              true,
+              fpEnableToken,
               fpRequireToken,
-              parsedFpTokens,
+              fpEnableToken ? parsedFpTokens : 0,
               fpAllowGasless,
               overrides
             ),
-            onRetry: () => setStatus('Retrying token config...')
+            onRetry: () => setStatus('Retrying config...')
           });
           await configTx.wait();
           configDone = true;
@@ -1984,7 +1995,7 @@ export default function AdminPanel({ mode = 'production', role }) {
         // Fallback: in local mode, use the contract owner's key
         if (!configDone && mode === 'local') {
           try {
-            setStatus('Configuring token voting via owner...');
+            setStatus(fpEnableToken ? 'Configuring token voting via owner...' : 'Configuring gasless voting via owner...');
             const ownerAccount = HARDHAT_ACCOUNTS[0]; // Account #0 is the owner
             const rpc = process.env.REACT_APP_HARDHAT_RPC || 'http://127.0.0.1:8545';
             const ownerWallet = new ethers.Wallet(ownerAccount.key, new ethers.JsonRpcProvider(rpc));
@@ -1993,13 +2004,13 @@ export default function AdminPanel({ mode = 'production', role }) {
               signer: ownerWallet,
               sendTx: (overrides = {}) => emAsOwner.configureTokenVoting(
                 newPollId,
-                true,
+                fpEnableToken,
                 fpRequireToken,
-                parsedFpTokens,
+                fpEnableToken ? parsedFpTokens : 0,
                 fpAllowGasless,
                 overrides
               ),
-              onRetry: () => setStatus('Retrying token config (owner)...')
+              onRetry: () => setStatus('Retrying config (owner)...')
             });
             await configTx.wait();
             configDone = true;
@@ -2015,7 +2026,7 @@ export default function AdminPanel({ mode = 'production', role }) {
       }
 
       if (tokenConfigSuccess) {
-        const gaslessNote = fpEnableToken && fpAllowGasless ? ' with gasless voting enabled' : '';
+        const gaslessNote = fpAllowGasless ? ' with gasless voting enabled' : '';
         setStatus(
           `✅ Franchise poll created${gaslessNote}! TX: ${receipt.hash.slice(0, 10)}...\n` +
           `⚠️ IMPORTANT: Your poll is not ready yet! You must add candidates and authorize voters before the poll starts, otherwise nobody will be able to vote.`
@@ -3170,11 +3181,15 @@ export default function AdminPanel({ mode = 'production', role }) {
                   <input
                     type="checkbox"
                     checked={allowGaslessVoting}
-                    disabled={!enableTokenVoting}
                     onChange={e => setAllowGaslessVoting(e.target.checked)}
                   />
-                  <span>Allow gasless token voting (requires paymaster)</span>
+                  <span>Allow gasless voting (requires paymaster — voters pay zero gas)</span>
                 </label>
+                {allowGaslessVoting && !enableTokenVoting && (
+                  <div className="muted small" style={{ color: 'var(--info, #268bd2)' }}>
+                    ℹ️ Gasless voting enabled without tokens. Voters will see a "⛽ Vote Gasless" button. Make sure a paymaster is funded.
+                  </div>
+                )}
 
                 <hr style={{ margin: '12px 0', opacity: 0.1 }} />
                 <details>
@@ -3254,7 +3269,7 @@ export default function AdminPanel({ mode = 'production', role }) {
                     <label className="form-label" style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
                       <input type="checkbox" checked={fpEnableToken} onChange={e => {
                         setFpEnableToken(e.target.checked);
-                        if (!e.target.checked) { setFpRequireToken(false); setFpAllowGasless(false); }
+                        if (!e.target.checked) { setFpRequireToken(false); }
                       }} />
                       Enable Token Voting
                     </label>
@@ -3273,19 +3288,19 @@ export default function AdminPanel({ mode = 'production', role }) {
                           className="form-input"
                         />
                         <div className="muted small">Number of tokens each voter receives for this poll</div>
-                        <label className="form-label" style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                          <input type="checkbox" checked={fpAllowGasless} onChange={e => setFpAllowGasless(e.target.checked)} />
-                          Allow gasless voting (⛽ voters pay zero gas)
-                        </label>
-                        {fpAllowGasless && (
-                          <div className="muted small">Requires a funded paymaster. Voters will see a "⛽ Vote Gasless" button.</div>
-                        )}
-                        {fpAllowGasless && (
-                          <div className="muted small" style={{ color: 'var(--info, #268bd2)' }}>
-                            ℹ️ For secret ballot polls, gasless voting sponsors gas to the voter from the paymaster. Works with both regular and secret ballot polls.
-                          </div>
-                        )}
                       </>
+                    )}
+                    <label className="form-label" style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                      <input type="checkbox" checked={fpAllowGasless} onChange={e => setFpAllowGasless(e.target.checked)} />
+                      Allow gasless voting (⛽ voters pay zero gas)
+                    </label>
+                    {fpAllowGasless && (
+                      <div className="muted small">Requires a funded paymaster. Voters will see a "⛽ Vote Gasless" button.</div>
+                    )}
+                    {fpAllowGasless && (
+                      <div className="muted small" style={{ color: 'var(--info, #268bd2)' }}>
+                        ℹ️ For secret ballot polls, gasless voting sponsors gas to the voter from the paymaster. Works with both regular and secret ballot polls.
+                      </div>
                     )}
                     {myFranchise.feePerPoll !== '0.0' && (
                       <div className="muted small">Fee: {myFranchise.feePerPoll} ETH will be sent with this transaction.</div>
@@ -3517,8 +3532,17 @@ export default function AdminPanel({ mode = 'production', role }) {
                 <PollSelect
                   value={secretBallotPollId}
                   onChange={e => setSecretBallotPollId(e.target.value)}
-                  filterFn={p => !p.ended && !p.isSecretBallot}
+                  filterFn={p => !p.ended && !p.isSecretBallot && !p.status?.started}
                 />
+                {secretBallotPollId && (() => {
+                  const sp = polls.find(p => String(p.id) === String(secretBallotPollId));
+                  if (sp?.status?.started) return (
+                    <div className="muted small" style={{ color: 'var(--warning, #b58900)' }}>
+                      ⚠️ This poll has already started. Secret ballot can only be enabled before the poll starts. Create a new poll with a later start time, or set a reveal duration during poll creation.
+                    </div>
+                  );
+                  return null;
+                })()}
                 {secretBallotPollId && polls.find(p => String(p.id) === String(secretBallotPollId))?.tokenConfig?.allowGaslessVoting && (
                   <div className="muted small" style={{ color: 'var(--info, #268bd2)' }}>
                     ℹ️ This poll has gasless voting enabled. For secret ballots, gas will be sponsored from the paymaster to the voter so they can commit their vote at zero cost.
