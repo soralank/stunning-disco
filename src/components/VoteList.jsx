@@ -362,15 +362,24 @@ export default function VoteList({ mode = 'production' }) {
             allowGaslessVoting: false
           };
 
+          // Use the poll struct's tokenVotingEnabled as the source of truth
+          // (set by createPoll). getTokenConfig() can return stale/default values.
+          const pollTokenEnabled = Boolean(poll.tokenVotingEnabled ?? poll[9] ?? false);
+          const pollTokenRequired = Boolean(poll.tokenVotingRequired ?? poll[10] ?? false);
+
           try {
             const rawTokenConfig = await contract.getTokenConfig(i);
             tokenConfig = {
-              enabled: rawTokenConfig?.enabled ?? rawTokenConfig?.[0] ?? false,
-              tokenRequired: rawTokenConfig?.tokenRequired ?? rawTokenConfig?.[1] ?? false,
-              tokensPerVoter: Number(rawTokenConfig?.tokensPerVoter ?? rawTokenConfig?.[2] ?? 0),
-              allowGaslessVoting: rawTokenConfig?.allowGaslessVoting ?? rawTokenConfig?.[3] ?? false
+              enabled: pollTokenEnabled && (rawTokenConfig?.enabled ?? rawTokenConfig?.[0] ?? false),
+              tokenRequired: pollTokenRequired && (rawTokenConfig?.tokenRequired ?? rawTokenConfig?.[1] ?? false),
+              tokensPerVoter: pollTokenEnabled ? Number(rawTokenConfig?.tokensPerVoter ?? rawTokenConfig?.[2] ?? 0) : 0,
+              allowGaslessVoting: pollTokenEnabled ? (rawTokenConfig?.allowGaslessVoting ?? rawTokenConfig?.[3] ?? false) : false
             };
           } catch {
+            // If getTokenConfig fails, fall back to poll struct flags with safe defaults
+            if (pollTokenEnabled) {
+              tokenConfig = { enabled: true, tokenRequired: pollTokenRequired, tokensPerVoter: 0, allowGaslessVoting: false };
+            }
           }
 
           let voterTokenBalance = 0;
@@ -611,10 +620,10 @@ export default function VoteList({ mode = 'production' }) {
       }
 
       const isTokenEnabledEffective = Boolean(
-        tokenConfig.enabled || tokenFlagsFromPoll.enabled || currentPoll?.tokenConfig?.enabled
+        tokenFlagsFromPoll.enabled && (tokenConfig.enabled || currentPoll?.tokenConfig?.enabled)
       );
       const isTokenRequiredEffective = Boolean(
-        tokenConfig.tokenRequired || tokenFlagsFromPoll.required || currentPoll?.tokenConfig?.tokenRequired
+        tokenFlagsFromPoll.required && (tokenConfig.tokenRequired || currentPoll?.tokenConfig?.tokenRequired)
       );
 
       setStatus('Submitting vote...');
@@ -1472,10 +1481,12 @@ export default function VoteList({ mode = 'production' }) {
                       </h4>
                       <div className="muted small">{timeLabel}</div>
                       {statusMessage && <div className="muted small">{statusMessage}</div>}
-                      {poll.tokenConfig?.enabled && (
+                      {poll.tokenConfig?.enabled && (poll.tokenConfig.tokenRequired || poll.voterTokenBalance > 0) && (
                         <div className="muted small">
                           {poll.tokenConfig.tokenRequired
-                            ? `🔐 Token vote required (${poll.voterTokenBalance} tokens)`
+                            ? (poll.voterTokenBalance > 0
+                              ? `🔐 Token vote required (${poll.voterTokenBalance} tokens)`
+                              : '🔐 Token vote required (no tokens allocated yet)')
                             : `🪙 Token voting enabled (${poll.voterTokenBalance} tokens)`}
                         </div>
                       )}

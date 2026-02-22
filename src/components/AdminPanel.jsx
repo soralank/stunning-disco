@@ -363,15 +363,24 @@ export default function AdminPanel({ mode = 'production', role }) {
             allowGaslessVoting: false
           };
 
+          // Use the poll struct's tokenVotingEnabled as the source of truth
+          // (set by createPoll). getTokenConfig() can return stale/default values.
+          const pollTokenEnabled = Boolean(poll.tokenVotingEnabled ?? poll[9] ?? false);
+          const pollTokenRequired = Boolean(poll.tokenVotingRequired ?? poll[10] ?? false);
+
           try {
             const rawTokenConfig = await contract.getTokenConfig(i);
             tokenConfig = {
-              enabled: rawTokenConfig?.enabled ?? rawTokenConfig?.[0] ?? false,
-              tokenRequired: rawTokenConfig?.tokenRequired ?? rawTokenConfig?.[1] ?? false,
-              tokensPerVoter: Number(rawTokenConfig?.tokensPerVoter ?? rawTokenConfig?.[2] ?? 0),
-              allowGaslessVoting: rawTokenConfig?.allowGaslessVoting ?? rawTokenConfig?.[3] ?? false
+              enabled: pollTokenEnabled && (rawTokenConfig?.enabled ?? rawTokenConfig?.[0] ?? false),
+              tokenRequired: pollTokenRequired && (rawTokenConfig?.tokenRequired ?? rawTokenConfig?.[1] ?? false),
+              tokensPerVoter: pollTokenEnabled ? Number(rawTokenConfig?.tokensPerVoter ?? rawTokenConfig?.[2] ?? 0) : 0,
+              allowGaslessVoting: pollTokenEnabled ? (rawTokenConfig?.allowGaslessVoting ?? rawTokenConfig?.[3] ?? false) : false
             };
           } catch {
+            // If getTokenConfig fails, fall back to poll struct flags with safe defaults
+            if (pollTokenEnabled) {
+              tokenConfig = { enabled: true, tokenRequired: pollTokenRequired, tokensPerVoter: 0, allowGaslessVoting: false };
+            }
           }
 
           let status;
@@ -3377,17 +3386,19 @@ export default function AdminPanel({ mode = 'production', role }) {
                 />
                 {voterPollId && (() => {
                   const selectedPoll = polls.find(p => String(p.id) === String(voterPollId));
-                  if (!selectedPoll?.tokenConfig?.enabled) return null;
+                  const tc = selectedPoll?.tokenConfig;
+                  // Only show token fields when token voting is genuinely configured
+                  // (enabled AND either required or has tokens allocated)
+                  if (!tc?.enabled || (!tc.tokenRequired && !tc.tokensPerVoter)) return null;
                   return (
                     <>
                       <div className="muted small">
-                        Token voting enabled.
-                        {selectedPoll.tokenConfig.tokenRequired ? ' Token required.' : ' Token optional.'}
-                        {' '}Tokens/voter: {selectedPoll.tokenConfig.tokensPerVoter || 0}
-                        {selectedPoll.tokenConfig.allowGaslessVoting ? ' • Gasless' : ''}
+                        Token voting {tc.tokenRequired ? 'required' : 'enabled'}.
+                        {tc.tokensPerVoter > 0 ? ` Tokens/voter: ${tc.tokensPerVoter}` : ''}
+                        {tc.allowGaslessVoting ? ' • Gasless' : ''}
                       </div>
                       <input
-                        type="number" min="1" placeholder="Fallback tokens per voter"
+                        type="number" min="1" placeholder="Tokens per voter (override)"
                         value={voterTokensPerVoter}
                         onChange={e => setVoterTokensPerVoter(e.target.value)}
                         className="form-input"
