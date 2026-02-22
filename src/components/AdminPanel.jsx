@@ -1840,7 +1840,9 @@ export default function AdminPanel({ mode = 'production', role }) {
   // Returns { funded, deficit, totalNeeded, balance, voterCount } or null if no gasless polls
   function getPaymasterBudgetStatus() {
     const bal = parseFloat(paymasterBalance || myFranchise?.paymasterBalance || '0');
-    const hasPaymaster = myFranchise?.votingPaymaster && myFranchise.votingPaymaster !== ethers.ZeroAddress;
+    const hasFranchisePaymaster = myFranchise?.votingPaymaster && myFranchise.votingPaymaster !== ethers.ZeroAddress;
+    const hasGlobalPaymaster = paymasterStatus?.configured && paymasterStatus?.deployed;
+    const hasPaymaster = hasFranchisePaymaster || hasGlobalPaymaster;
     if (!hasPaymaster) return null;
 
     // Find polls that have gasless voting enabled and are not ended/revealed
@@ -2668,15 +2670,23 @@ export default function AdminPanel({ mode = 'production', role }) {
 
     // Gasless voting enabled but paymaster may be underfunded
     if (poll.tokenConfig?.allowGaslessVoting && (info.isActiveEffective || info.isUpcoming)) {
-      const budget = getPaymasterBudgetStatus();
-      if (budget) {
-        if (budget.balance === 0) {
-          warnings.push('Gasless voting is enabled but paymaster has zero balance — voters will not be able to vote gaslessly');
-        } else if (budget.maxVotersAffordable < 1) {
-          warnings.push('Paymaster balance too low to sponsor even one gasless vote — fund the paymaster');
-        }
-      } else if (!myFranchise?.votingPaymaster || myFranchise.votingPaymaster === ethers.ZeroAddress) {
+      // Check all paymaster sources: per-poll, per-franchise, and global
+      const hasPollPaymaster = poll.pollPaymaster && poll.pollPaymaster !== ethers.ZeroAddress;
+      const hasFranchisePaymaster = myFranchise?.votingPaymaster && myFranchise.votingPaymaster !== ethers.ZeroAddress;
+      const hasGlobalPaymaster = paymasterStatus?.configured && paymasterStatus?.deployed;
+      const hasAnyPaymaster = hasPollPaymaster || hasFranchisePaymaster || hasGlobalPaymaster;
+
+      if (!hasAnyPaymaster) {
         warnings.push('Gasless voting is enabled but no paymaster is configured');
+      } else {
+        const budget = getPaymasterBudgetStatus();
+        if (budget) {
+          if (budget.balance === 0) {
+            warnings.push('Gasless voting is enabled but paymaster has zero balance — voters will not be able to vote gaslessly');
+          } else if (budget.maxVotersAffordable < 1) {
+            warnings.push('Paymaster balance too low to sponsor even one gasless vote — fund the paymaster');
+          }
+        }
       }
     }
     return warnings;
