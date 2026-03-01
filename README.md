@@ -28,6 +28,12 @@ A decentralized election voting system built with React and Solidity smart contr
    - Add candidates, authorize voters (single or bulk), reveal results, end polls
 - **Voter Features**:
    - View authorized polls, cast votes (standard, gasless, or weighted), reveal secret ballots, view results with winner/tie detection
+- **Upgradeable Contract Support (V1/V2)**:
+   - Separate UI routes (`/upgradeable/*`) for UUPS proxy contracts
+   - V1: Core voting (same features as Final, behind an upgradeable proxy)
+   - V2: Adds poll categories, vote weights (1–10×), pause/unpause, on-chain descriptions, deadline extension, emergency end, participation stats
+   - Configurable via `REACT_APP_CONTRACT_VERSION` (1 or 2)
+   - Upgrade path: V1 → V2 via `upgradeToAndCall()` preserving all poll data
 - **Contract-Enforced Security**:
    - One vote per address per poll (contract-enforced, not just UI)
    - Time-locked voting periods via `block.timestamp`
@@ -90,6 +96,10 @@ REACT_APP_SECRET_BALLOT_MANAGER_ADDRESS=<SecretBallotManager address>
 REACT_APP_FRANCHISE_MANAGER_ADDRESS=<FranchiseManager address>
 REACT_APP_VOTING_READER_ADDRESS=<VotingReader address>
 REACT_APP_HARDHAT_RPC=http://127.0.0.1:8545
+
+# For upgradeable contracts (optional):
+REACT_APP_UPGRADEABLE_CONTRACT_ADDRESS=<Proxy address>
+REACT_APP_CONTRACT_VERSION=2  # 1 for V1, 2 for V2
 ```
 
 ## Usage Overview
@@ -103,6 +113,30 @@ REACT_APP_HARDHAT_RPC=http://127.0.0.1:8545
 
 1. Open `/local/voter` (local mode) or `/voter` (production with MetaMask)
 2. View authorized polls → vote → (for secret ballot: return to reveal after poll ends)
+
+### Upgradeable Contract Routes
+
+The app provides separate routes for the upgradeable (UUPS proxy) contracts:
+
+| Local Route | Production Route | Purpose |
+|---|---|---|
+| `/local/upgradeable/admin` | `/upgradeable/admin` | Admin panel (V1/V2 features) |
+| `/local/upgradeable/voter` | `/upgradeable/voter` | Voter interface (V1/V2) |
+| `/local/upgradeable/results` | `/upgradeable/results` | Results viewer (V1/V2) |
+
+Toggle between Final and Upgradeable using the nav link. Set `REACT_APP_CONTRACT_VERSION=1` (V1) or `2` (V2) in `.env.development`.
+
+#### Upgrading V1 → V2
+
+If your proxy is running V1 and you want V2 features:
+
+```bash
+# From the votingsystem repo:
+npx hardhat ignition deploy ignition/modules/UpgradeToV2.ts \
+  --parameters ignition/parameters/upgrade-v2.json --network localhost
+```
+
+Or manually via the `_upgrade-to-v2.js` script in this repo. After upgrading, set `REACT_APP_CONTRACT_VERSION=2` and restart the dev server.
 
 > For detailed step-by-step walkthroughs, see [WORKFLOW.md](WORKFLOW.md).
 

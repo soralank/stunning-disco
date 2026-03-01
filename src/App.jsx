@@ -5,6 +5,9 @@ import VoterPage from './pages/VoterPage';
 import AdminPage from './pages/AdminPage';
 import FranchiseePage from './pages/FranchiseePage';
 import ResultsPage from './pages/ResultsPage';
+import UpgradeableAdminPage from './pages/UpgradeableAdminPage';
+import UpgradeableVoterPage from './pages/UpgradeableVoterPage';
+import UpgradeableResultsPage from './pages/UpgradeableResultsPage';
 
 const IS_DEV = process.env.NODE_ENV !== 'production';
 
@@ -22,6 +25,12 @@ export default function App() {
             <Route path="/local/admin" element={<AdminPage mode="local" />} />
             <Route path="/local/franchisee" element={<FranchiseePage mode="local" />} />
             <Route path="/local/results" element={<ResultsPage mode="local" />} />
+
+            {/* Upgradeable contract routes (local) */}
+            <Route path="/local/upgradeable" element={<Navigate to="/local/upgradeable/admin" replace />} />
+            <Route path="/local/upgradeable/admin" element={<UpgradeableAdminPage mode="local" />} />
+            <Route path="/local/upgradeable/voter" element={<UpgradeableVoterPage mode="local" />} />
+            <Route path="/local/upgradeable/results" element={<UpgradeableResultsPage mode="local" />} />
           </>
         )}
 
@@ -30,6 +39,12 @@ export default function App() {
         <Route path="/admin" element={<AdminPage mode="production" />} />
         <Route path="/franchisee" element={<FranchiseePage mode="production" />} />
         <Route path="/results" element={<ResultsPage mode="production" />} />
+
+        {/* Upgradeable contract routes (production) */}
+        <Route path="/upgradeable" element={<Navigate to="/upgradeable/admin" replace />} />
+        <Route path="/upgradeable/admin" element={<UpgradeableAdminPage mode="production" />} />
+        <Route path="/upgradeable/voter" element={<UpgradeableVoterPage mode="production" />} />
+        <Route path="/upgradeable/results" element={<UpgradeableResultsPage mode="production" />} />
       </Routes>
     </Layout>
   );

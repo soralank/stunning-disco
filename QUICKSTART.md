@@ -25,6 +25,11 @@ Then:
 - **Admin**: http://localhost:3000/local/admin → Click "Account #0 (Owner)"
 - **Voter**: http://localhost:3000/local/voter → Click "Account #1"
 - **Results**: http://localhost:3000/local/results
+- **Upgradeable Admin**: http://localhost:3000/local/upgradeable/admin (V1/V2 contract)
+- **Upgradeable Voter**: http://localhost:3000/local/upgradeable/voter
+- **Upgradeable Results**: http://localhost:3000/local/upgradeable/results
+
+Set `REACT_APP_CONTRACT_VERSION=1` (V1) or `2` (V2) in `.env.development` for the upgradeable routes.
 
 ---
 

@@ -16,6 +16,9 @@ The voting system has **two separate modes** via routing. This guide covers setu
 | `/local/admin` | Admin interface with Hardhat account buttons |
 | `/local/franchisee` | Franchisee interface |
 | `/local/results` | Public results viewer |
+| `/local/upgradeable/admin` | Upgradeable (V1/V2) admin interface |
+| `/local/upgradeable/voter` | Upgradeable (V1/V2) voter interface |
+| `/local/upgradeable/results` | Upgradeable (V1/V2) results viewer |
 
 Click account buttons to connect instantly. Uses Hardhat test accounts (Account #0–#4). No MetaMask required.
 
@@ -27,8 +30,12 @@ Click account buttons to connect instantly. Uses Hardhat test accounts (Account 
 | `/admin` | Admin interface — MetaMask wallet connection |
 | `/franchisee` | Franchisee interface — MetaMask wallet connection |
 | `/results` | Public results viewer |
+| `/upgradeable/admin` | Upgradeable (V1/V2) admin — MetaMask |
+| `/upgradeable/voter` | Upgradeable (V1/V2) voter — MetaMask |
+| `/upgradeable/results` | Upgradeable (V1/V2) results — MetaMask |
 
 Switching: use the "→ Production Mode" / "→ Local Testing" links in the navigation bar.
+Toggle between Final and Upgradeable contracts using the nav link.
 
 ---
 

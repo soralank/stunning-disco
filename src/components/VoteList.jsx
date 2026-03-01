@@ -6,7 +6,7 @@ import SearchBar from './SearchBar';
 
 // Read from env or use hardcoded defaults
 const DEFAULT_ACCOUNTS = [
-  { name: 'Account #0 (Owner)', key: '0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80', address: '0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266' },
+  { name: 'Account #0', key: '0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80', address: '0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266' },
   { name: 'Account #1', key: '0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d', address: '0x70997970C51812dc3A010C7d01b50e0d17dc79C8' },
   { name: 'Account #2', key: '0x5de4111afa1a4b94908f83103eb1f1706367c2e68ca870fc3fb9a804cdab365a', address: '0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC' },
   { name: 'Account #3', key: '0x7c852118294e51e653712a81e05800f419141751be58f605c371e15141b007a6', address: '0x90F79bf6EB2c4f870365E785982E1f101E93b906' },
@@ -569,6 +569,7 @@ export default function VoteList({ mode = 'production' }) {
               lastPoll.sbStatus = null;
             }
           }
+
         } catch (pollErr) {
           console.warn(`Failed to load poll #${i}:`, pollErr.message);
         }
@@ -1370,14 +1371,14 @@ export default function VoteList({ mode = 'production' }) {
               <h3>Select Test Account</h3>
             </div>
             <p className="muted">
-              Connect with a test account (Accounts #1, #2, #3, #4 are typically authorized as voters)
+              Connect with a test account to see polls you can vote in.
             </p>
             <div className="account-grid">
-              {HARDHAT_ACCOUNTS.slice(1).map((account, index) => (
+              {HARDHAT_ACCOUNTS.map((account, index) => (
                 <button
-                  key={index + 1}
+                  key={index}
                   className="btn secondary"
-                  onClick={() => connectLocalAccount(index + 1)}
+                  onClick={() => connectLocalAccount(index)}
                 >
                   {account.name}
                 </button>
@@ -1414,11 +1415,11 @@ export default function VoteList({ mode = 'production' }) {
           <div>
             <div className="muted">Switch between test voters.</div>
             <div className="account-grid">
-              {HARDHAT_ACCOUNTS.slice(1).map((account, index) => (
+              {HARDHAT_ACCOUNTS.map((account, index) => (
                 <button
-                  key={index + 1}
-                  className={`btn ghost ${selectedAccount === index + 1 && walletSigner ? 'is-active' : ''}`}
-                  onClick={() => connectLocalAccount(index + 1)}
+                  key={index}
+                  className={`btn ghost ${selectedAccount === index && walletSigner ? 'is-active' : ''}`}
+                  onClick={() => connectLocalAccount(index)}
                 >
                   {account.name}
                 </button>

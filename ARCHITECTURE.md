@@ -32,38 +32,65 @@ Stunning Disco is a decentralized voting platform with a React frontend communic
 
 | Contract | Responsibility |
 |---|---|
-| `ElectionsManager` | Core poll lifecycle: create, vote, reveal results, end |
+| `ElectionsManager` | Core poll lifecycle: create, vote, reveal results, end (non-upgradeable / "Final") |
+| `ElectionsManagerUpgradeable` (V1) | UUPS proxy — same core voting as Final, deployed behind a transparent proxy |
+| `ElectionsManagerUpgradeableV2` (V2) | V1 + categories, vote weights, pause/unpause, descriptions, deadline extension, emergency end, poll stats |
 | `FranchiseManager` | Franchisee registration, fee management, poll ownership scoping |
 | `VotingPaymaster` | Gasless voting: holds ETH, sponsors voter gas via EIP-712 relay |
 | `SecretBallotManager` | Commit-reveal protocol: commit hashes, reveal with salt, finalize |
 | `TokenManager` | ERC-20 voting token minting, balance tracking, weighted-vote enforcement |
 | `VotingReader` | Read-only aggregation: batch-fetches poll data for frontend efficiency |
 
+#### Upgradeable Contract Architecture (UUPS Proxy)
+
+The system supports upgradeable (UUPS proxy) contracts alongside the original non-upgradeable ("Final") contract:
+
+- **V1** — Core voting features (create poll, add candidates, authorize voters, vote, reveal, end). Deployed behind an ERC-1967 proxy.
+- **V2** — Inherits V1 and adds: poll categories, vote weight multipliers (1–10×), poll pause/unpause, on-chain descriptions, deadline extension, emergency end, participation stats.
+- **Upgrade path** — V1 → V2 via `upgradeToAndCall(newImpl, initializeV2())`. The proxy address stays the same; only the implementation changes.
+- **ABI selection** — The frontend reads `REACT_APP_CONTRACT_VERSION` (1 or 2) and loads the matching ABI. Both versions share the same proxy address (`REACT_APP_UPGRADEABLE_CONTRACT_ADDRESS`).
+
+**Known V1/V2 contract quirks** (Hardhat v3):
+- `getPollsCount()` and `getOptionsCount()` underreport by 1 (phantom empty entry at index 0)
+- `getPollStatus()` returns 4 booleans: `[started, active, ended, revealed]` — not 3
+- `getOption()` returns a plain string (name only) — vote counts fetched separately via `getVotes(pollId, optionId)`
+- `getWinner()` returns `(uint256 winnerId, string winnerName)` — not `(name, votes)`
+- Hardhat block timestamp only advances on new transactions, not on view calls — the frontend augments on-chain status with wall-clock time checks
+
 ### Frontend Layer
 
 | Module | Lines | Responsibility |
 |---|---|---|
-| `AdminPanel.jsx` | ~4,250 | Owner + franchisee poll management, paymaster deployment, infrastructure config |
-| `VoteList.jsx` | ~1,740 | Voter interface: standard/gasless/secret ballot voting, auto-reveal |
-| `ResultsList.jsx` | ~400 | Read-only results display, tie detection, winner computation |
-| `contract/index.js` | ~380 | Provider management, ABI resolution, nonce retry, error decoding |
-| `Layout.jsx` | ~90 | Navigation shell, mode detection (local vs production) |
+| `AdminPanel.jsx` | ~4,250 | Owner + franchisee poll management, paymaster deployment, infrastructure config (Final contract) |
+| `VoteList.jsx` | ~1,740 | Voter interface: standard/gasless/secret ballot voting, auto-reveal (Final contract) |
+| `ResultsList.jsx` | ~400 | Read-only results display, tie detection, winner computation (Final contract) |
+| `UpgradeableAdminPanel.jsx` | ~970 | Admin panel for V1/V2 upgradeable contracts — poll CRUD, V2 features (categories, pause, weights, etc.) |
+| `UpgradeableVoteList.jsx` | ~420 | Voter interface for V1/V2 — wall-clock time augmentation, pre-flight checks |
+| `UpgradeableResultsList.jsx` | ~270 | Results display for V1/V2 — wall-clock augmentation, V2 stats/categories |
+| `contract/index.js` | ~510 | Provider management, dual ABI resolution (Final + V1/V2), nonce retry, error decoding |
+| `utils/contractVersion.js` | ~60 | Version detection (`IS_V2`, `V2_FEATURES` flags) from `REACT_APP_CONTRACT_VERSION` |
+| `Layout.jsx` | ~120 | Navigation shell, mode + version detection, Final ↔ Upgradeable toggle |
 
 ### File Structure
 
 ```
 src/
-├── App.jsx                    # Route definitions, mode gating
+├── App.jsx                           # Route definitions, mode gating, Final + Upgradeable routes
 ├── components/
-│   ├── AdminPanel.jsx         # Owner + franchisee management UI
-│   ├── VoteList.jsx           # Voter interface (vote, commit, reveal)
-│   ├── ResultsList.jsx        # Public results viewer
-│   ├── Layout.jsx             # App shell, nav, mode badge
-│   ├── SearchBar.jsx          # Controlled search + filter chips
-│   └── Pagination.jsx         # Page-size selector, smart page numbers
+│   ├── AdminPanel.jsx                # Owner + franchisee management UI (Final contract)
+│   ├── VoteList.jsx                  # Voter interface — standard/gasless/secret ballot (Final)
+│   ├── ResultsList.jsx               # Public results viewer (Final)
+│   ├── UpgradeableAdminPanel.jsx     # Admin panel for V1/V2 upgradeable contracts
+│   ├── UpgradeableVoteList.jsx       # Voter interface for V1/V2 upgradeable contracts
+│   ├── UpgradeableResultsList.jsx    # Results viewer for V1/V2 upgradeable contracts
+│   ├── Layout.jsx                    # App shell, nav, mode badge, version indicator
+│   ├── SearchBar.jsx                 # Controlled search + filter chips
+│   └── Pagination.jsx                # Page-size selector, smart page numbers
 ├── contract/
-│   ├── index.js               # Provider factory, contract getters, error handling
-│   ├── electionManager.abi.json
+│   ├── index.js                      # Provider factory, contract getters (Final + Upgradeable), error handling
+│   ├── electionManager.abi.json      # Final (non-upgradeable) ElectionsManager ABI
+│   ├── electionManagerV1.abi.json    # V1 Upgradeable ElectionsManager ABI
+│   ├── electionManagerV2.abi.json    # V2 Upgradeable ElectionsManager ABI
 │   ├── franchiseeManager.abi.json
 │   ├── secretBallotManager.abi.json
 │   ├── tokenManager.abi.json
@@ -71,12 +98,16 @@ src/
 │   ├── votingPaymaster.bytecode.json
 │   └── votingReader.abi.json
 ├── pages/
-│   ├── AdminPage.jsx          # Wraps AdminPanel with mode prop
-│   ├── FranchiseePage.jsx     # Wraps AdminPanel with role="franchisee"
-│   ├── VoterPage.jsx          # Wraps VoteList with mode prop
-│   └── ResultsPage.jsx        # Wraps ResultsList with mode prop
+│   ├── AdminPage.jsx                 # Wraps AdminPanel with mode prop
+│   ├── FranchiseePage.jsx            # Wraps AdminPanel with role="franchisee"
+│   ├── VoterPage.jsx                 # Wraps VoteList with mode prop
+│   ├── ResultsPage.jsx               # Wraps ResultsList with mode prop
+│   ├── UpgradeableAdminPage.jsx      # Wraps UpgradeableAdminPanel with mode prop
+│   ├── UpgradeableVoterPage.jsx      # Wraps UpgradeableVoteList with mode prop
+│   └── UpgradeableResultsPage.jsx    # Wraps UpgradeableResultsList with mode prop
 └── utils/
-    └── logger.js              # Dev-only logging (suppressed in production)
+    ├── contractVersion.js            # Version detection (IS_V2, V2_FEATURES, VERSION_LABEL)
+    └── logger.js                     # Dev-only logging (suppressed in production)
 ```
 
 ---
@@ -488,6 +519,8 @@ The application operates in two distinct modes, determined by URL path and build
 | `REACT_APP_SECRET_BALLOT_MANAGER_ADDRESS` | **Yes** | — (throws) | SecretBallotManager deployed address |
 | `REACT_APP_FRANCHISE_MANAGER_ADDRESS` | **Yes** | — (throws) | FranchiseManager deployed address |
 | `REACT_APP_VOTING_READER_ADDRESS` | **Yes** | — (throws) | VotingReader deployed address |
+| `REACT_APP_UPGRADEABLE_CONTRACT_ADDRESS` | No* | — | Upgradeable (UUPS proxy) ElectionsManager address. Required for `/upgradeable/*` routes. |
+| `REACT_APP_CONTRACT_VERSION` | No | `final` | ABI version for upgradeable routes: `final` (disabled), `1` (V1), or `2` (V2) |
 | `REACT_APP_HARDHAT_RPC` | No | `http://localhost:8545` | RPC endpoint for local mode |
 | `REACT_APP_ABI` | No | Local JSON files | ElectionsManager ABI (JSON string) |
 | `REACT_APP_CHAIN_ID` | No | Skipped | Expected chain ID for verification |

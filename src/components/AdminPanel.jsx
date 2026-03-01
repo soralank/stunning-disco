@@ -494,6 +494,7 @@ export default function AdminPanel({ mode = 'production', role }) {
           } catch { lastPoll.maxChoices = 0; }
           try { lastPoll.delegationEnabled = await contract.delegationEnabled(i); } catch { lastPoll.delegationEnabled = false; }
           try { lastPoll.metadataURI = await contract.getPollMetadata(i); } catch { lastPoll.metadataURI = ''; }
+
         } catch (pollErr) {
           console.warn(`Failed to load poll #${i}:`, pollErr.message);
           // Continue to next poll
@@ -1411,11 +1412,22 @@ export default function AdminPanel({ mode = 'production', role }) {
         }
       }
 
+      // ── Pre-check: verify the poll has ended before calling revealResults ──
+      const nowSec = Math.floor(Date.now() / 1000);
+      if (poll && !poll.ended && !(poll.endTime && poll.endTime <= nowSec)) {
+        const remaining = poll.endTime ? Math.max(0, poll.endTime - nowSec) : 0;
+        setStatus(`⚠️ Poll #${pollId} has not ended yet${remaining > 0 ? ` — ${Math.floor(remaining / 60)}m ${remaining % 60}s remaining` : ''}. Results can only be revealed after the voting period ends.`);
+        setLoading(false);
+        return;
+      }
+
       // ── Finalize: call contract.revealResults() ──
       // First try a staticCall to check if it will succeed
       setStatus('Finalizing results...');
+      let staticCallOk = false;
       try {
         await contract.revealResults.staticCall(pollId);
+        staticCallOk = true;
       } catch (staticErr) {
         const msg = (staticErr.message || String(staticErr)).toLowerCase();
         const details = getContractErrorDetails(staticErr, contract);
@@ -1428,32 +1440,53 @@ export default function AdminPanel({ mode = 'production', role }) {
           try {
             const sbmRead = getSecretBallotManagerContract(provider);
             const rd = Number(await sbmRead.getRevealDuration(pollId));
-            const poll = polls.find(p => p.id === Number(pollId) || p.id === pollId);
-            const revealEnd = poll.endTime + 30 + rd;
-            const remaining = Math.max(0, revealEnd - Math.floor(Date.now() / 1000));
+            const revealEnd = (poll?.endTime || 0) + 30 + rd;
+            const remaining = Math.max(0, revealEnd - nowSec);
             if (remaining > 0) hint = ` Estimated ${remaining}s remaining.`;
           } catch {}
           setStatus(`⏳ Reveal phase is still active — the contract requires it to end before finalizing.${hint} Click "Reveal" again after it ends.`);
           setLoading(false);
           return;
         }
+        // Check for "poll not ended" type rejections
+        if (combined.includes('not ended') || combined.includes('poll has not') || combined.includes('still active') || combined.includes('voting period')) {
+          setStatus(`⚠️ The contract rejected the reveal — the poll voting period may not have fully ended yet. Please wait and try again.`);
+          setLoading(false);
+          return;
+        }
         // For Hardhat "missing revert data" or other opaque errors, try sending the real tx anyway
         // The real tx will give a better error message
-        console.warn('[revealResults] staticCall failed, attempting real tx anyway:', msg.slice(0, 150));
+        console.warn('[revealResults] staticCall failed, attempting real tx anyway:', (msg || '').slice(0, 150));
       }
 
-      const tx = await sendTxWithNonceRetry({
-        signer,
-        sendTx: (overrides = {}) => contract.revealResults(pollId, overrides),
-        onRetry: () => setStatus('Nonce conflict detected, retrying reveal...')
-      });
-      await tx.wait();
+      try {
+        const tx = await sendTxWithNonceRetry({
+          signer,
+          sendTx: (overrides = {}) => contract.revealResults(pollId, overrides),
+          onRetry: () => setStatus('Nonce conflict detected, retrying reveal...')
+        });
+        await tx.wait();
+      } catch (txErr) {
+        // ethers v6 may throw internal TypeError (e.g. ".slice" on null revert data)
+        // when the contract reverts without a reason string on Hardhat
+        if (txErr instanceof TypeError) {
+          const txDetails = getContractErrorDetails(txErr, contract);
+          const friendlyMsg = txDetails.description || 'Transaction reverted — the contract rejected the reveal. The poll may not be in a revealable state.';
+          throw new Error(friendlyMsg);
+        }
+        throw txErr;
+      }
 
       setStatus('✅ Results revealed successfully!');
       await loadPolls();
     } catch (err) {
-      const details = getContractErrorDetails(err);
-      setStatus(`Error: ${details.description || err.message || err}`);
+      // Defensively handle TypeErrors from ethers internals (e.g. .slice on null revert data)
+      if (err instanceof TypeError) {
+        setStatus('Error: Transaction reverted by the contract — the poll may not be in a revealable state. Please verify it has ended and try again.');
+      } else {
+        const details = getContractErrorDetails(err);
+        setStatus(`Error: ${details.description || err.message || err}`);
+      }
     } finally {
       setLoading(false);
     }
@@ -1922,6 +1955,30 @@ export default function AdminPanel({ mode = 'production', role }) {
         return;
       }
 
+      // Pre-check: if the franchise has a custom paymaster, verify the paymaster
+      // admin matches the current signer (can fail after a franchise transfer)
+      if (myFranchise?.votingPaymaster && myFranchise.votingPaymaster !== ethers.ZeroAddress) {
+        try {
+          const provider = getEffectiveProvider();
+          const pm = getVotingPaymasterAt(myFranchise.votingPaymaster, provider);
+          const pmAdmin = await pm.admin();
+          const signerAddr = await signer.getAddress();
+          const emContract = getContract(provider);
+          const emOwner = await emContract.owner();
+          if (pmAdmin.toLowerCase() !== signerAddr.toLowerCase() && pmAdmin.toLowerCase() !== emOwner.toLowerCase()) {
+            setStatus(
+              `Error: Your franchise paymaster admin (${pmAdmin.slice(0, 8)}…) does not match your address. ` +
+              `This usually happens after a franchise transfer. The previous franchisee must call transferAdmin() ` +
+              `on the paymaster contract, or the contract owner can redeploy a paymaster for this franchise.`
+            );
+            setLoading(false);
+            return;
+          }
+        } catch (pmCheckErr) {
+          console.warn('[createFranchisePoll] paymaster admin check failed:', pmCheckErr.message?.slice(0, 80));
+        }
+      }
+
       setStatus('Creating franchise poll...');
       const tx = await sendTxWithNonceRetry({
         signer,
@@ -2060,6 +2117,49 @@ export default function AdminPanel({ mode = 'production', role }) {
       }
       const signer = walletSigner || await getSigner();
       const fm = getFranchiseManagerContract(signer);
+      const signerAddr = await signer.getAddress();
+
+      // --- Client-side pre-validation (Hardhat v3 strips revert data, so we
+      //     check each condition locally for clear error messages) ---
+      if (!myFranchiseId || myFranchiseId === 0n || myFranchiseId === 0) {
+        setStatus('Error: You do not have an active franchise to transfer.');
+        setLoading(false); return;
+      }
+      if (transferToAddress.toLowerCase() === signerAddr.toLowerCase()) {
+        setStatus('Error: You cannot transfer a franchise to yourself.');
+        setLoading(false); return;
+      }
+      const contractOwner = await fm.owner();
+      if (transferToAddress.toLowerCase() === contractOwner.toLowerCase()) {
+        setStatus('Error: The contract owner cannot be a franchisee.');
+        setLoading(false); return;
+      }
+      // Check if target already has an active franchise
+      const targetFid = await fm.franchiseeToId(transferToAddress);
+      if (targetFid > 0n) {
+        const targetActive = await fm.isFranchiseActive(targetFid);
+        if (targetActive) {
+          setStatus('Error: The target address already has an active franchise.');
+          setLoading(false); return;
+        }
+      }
+      // Check if there's already a pending transfer
+      const tr = await fm.transferRequests(myFranchiseId);
+      if (tr[0] && tr[0] !== ethers.ZeroAddress) {
+        setStatus('Error: A transfer is already pending for this franchise — ask the owner to approve or reject it first.');
+        setLoading(false); return;
+      }
+      // Check if franchise is expired or exhausted
+      const f = await fm.getFranchise(myFranchiseId);
+      if (f.expired) {
+        setStatus('Error: This franchise has expired and cannot be transferred.');
+        setLoading(false); return;
+      }
+      if (f.exhausted) {
+        setStatus('Error: This franchise has used all its allocated polls and cannot be transferred.');
+        setLoading(false); return;
+      }
+
       const fee = await fm.transferFee();
       setStatus('Requesting franchise transfer...');
       const tx = await sendTxWithNonceRetry({
@@ -2072,6 +2172,7 @@ export default function AdminPanel({ mode = 'production', role }) {
       setTransferToAddress('');
       await loadFranchises();
     } catch (err) {
+      console.error('[requestTransfer] error:', err);
       setStatus(`Error: ${getContractErrorDetails(err).description}`);
     } finally { setLoading(false); }
   }
@@ -2212,6 +2313,14 @@ export default function AdminPanel({ mode = 'production', role }) {
     try {
       const signer = walletSigner || await getSigner();
       const fm = getFranchiseManagerContract(signer);
+
+      // Capture franchise state BEFORE approval (need old franchisee + paymaster)
+      const raw = await fm.franchises(franchiseId);
+      const oldFranchisee = raw.franchisee || raw[0];
+      const pmAddr = raw.votingPaymaster || raw[6] || ethers.ZeroAddress;
+      const tr = await fm.transferRequests(franchiseId);
+      const newFranchisee = tr.newFranchisee || tr[0];
+
       setStatus(`Approving transfer for franchise #${franchiseId}...`);
       const tx = await sendTxWithNonceRetry({
         signer,
@@ -2219,7 +2328,46 @@ export default function AdminPanel({ mode = 'production', role }) {
         onRetry: () => setStatus('Retrying approveTransfer...')
       });
       await tx.wait();
-      setStatus(`✅ Transfer approved for franchise #${franchiseId}`);
+
+      // After approval: transfer paymaster admin from old→new franchisee
+      // (The contract's approveTransfer doesn't do this, causing BadPaymaster on poll creation)
+      let pmWarning = '';
+      if (pmAddr && pmAddr !== ethers.ZeroAddress && newFranchisee && newFranchisee !== ethers.ZeroAddress) {
+        try {
+          const provider = getEffectiveProvider();
+          const pm = getVotingPaymasterAt(pmAddr, provider);
+          const currentPmAdmin = await pm.admin();
+
+          if (currentPmAdmin.toLowerCase() === oldFranchisee.toLowerCase()) {
+            // Only the old franchisee can call transferAdmin — try using local account keys
+            let pmTransferred = false;
+            if (mode === 'local') {
+              const oldAcct = HARDHAT_ACCOUNTS.find(a => a.address?.toLowerCase() === oldFranchisee.toLowerCase());
+              if (oldAcct) {
+                const rpc = process.env.REACT_APP_HARDHAT_RPC || 'http://127.0.0.1:8545';
+                const oldWallet = new ethers.Wallet(oldAcct.key, new ethers.JsonRpcProvider(rpc));
+                const pmSigned = getVotingPaymasterAt(pmAddr, oldWallet);
+                setStatus('Transferring paymaster admin to new franchisee...');
+                const pmTx = await sendTxWithNonceRetry({
+                  signer: oldWallet,
+                  sendTx: (overrides = {}) => pmSigned.transferAdmin(newFranchisee, overrides),
+                  onRetry: () => setStatus('Retrying paymaster admin transfer...')
+                });
+                await pmTx.wait();
+                pmTransferred = true;
+              }
+            }
+            if (!pmTransferred) {
+              pmWarning = `\n⚠️ The franchise paymaster admin (${oldFranchisee.slice(0, 8)}…) must call transferAdmin(${newFranchisee.slice(0, 8)}…) on paymaster ${pmAddr.slice(0, 8)}… — otherwise the new franchisee cannot create polls.`;
+            }
+          }
+        } catch (pmErr) {
+          console.warn('[approveTransfer] paymaster admin transfer failed:', pmErr.message?.slice(0, 120));
+          pmWarning = `\n⚠️ Could not auto-transfer paymaster admin. The old franchisee (${oldFranchisee.slice(0, 8)}…) should manually transfer paymaster admin to the new franchisee.`;
+        }
+      }
+
+      setStatus(`✅ Transfer approved for franchise #${franchiseId}${pmWarning}`);
       await loadFranchises();
     } catch (err) {
       setStatus(`Error: ${getContractErrorDetails(err).description}`);

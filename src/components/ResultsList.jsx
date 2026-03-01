@@ -192,6 +192,7 @@ export default function ResultsList({ mode = 'production' }) {
               };
             } catch { lastResult.sbStatus = null; }
           }
+
         } catch (err) {
           console.warn(`Failed to load results for poll #${i}:`, err.message);
         }
