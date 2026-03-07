@@ -1,0 +1,183 @@
+# =============================================================================
+# CI/CD Pipeline — Build, Test, Deploy to GitHub Pages + Docker
+#
+# Environments:
+#   - test/qa  → push to 'develop' branch  → builds Docker image (Sepolia)
+#   - prod     → push to 'main' branch     → deploys to GitHub Pages + Docker
+#
+# GitHub Pages URL:
+#   https://soralank.github.io/stunning-disco
+#
+# Secrets you need to set in GitHub → Settings → Secrets:
+#   REACT_APP_CONTRACT_ADDRESS_PROD              — ElectionsManager (Sepolia)
+#   REACT_APP_TOKEN_MANAGER_ADDRESS_PROD         — TokenManager (Sepolia)
+#   REACT_APP_VOTING_PAYMASTER_ADDRESS_PROD      — VotingPaymaster (Sepolia)
+#   REACT_APP_SECRET_BALLOT_MANAGER_ADDRESS_PROD — SecretBallotManager (Sepolia)
+#   REACT_APP_FRANCHISE_MANAGER_ADDRESS_PROD     — FranchiseManager (Sepolia)
+#   REACT_APP_VOTING_READER_ADDRESS_PROD         — VotingReader (Sepolia)
+#   (Optional for develop Docker builds: same keys with _TEST suffix)
+# =============================================================================
+
+name: CI/CD
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main, develop]
+
+# Top-level permissions for GitHub Pages deployment
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+  packages: write
+
+# Only allow one Pages deployment at a time
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+env:
+  IMAGE_NAME: ghcr.io/${{ github.repository }}
+
+jobs:
+  # -------------------------------------------------------------------
+  # 1. Lint & Test
+  # -------------------------------------------------------------------
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 18
+          cache: npm
+
+      - run: npm ci
+      - run: CI=true npm test -- --watchAll=false
+
+  # -------------------------------------------------------------------
+  # 2. Build & Deploy to GitHub Pages (main branch only)
+  #    Deploys to: https://soralank.github.io/stunning-disco
+  # -------------------------------------------------------------------
+  deploy-pages:
+    name: Deploy to GitHub Pages
+    needs: test
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 18
+          cache: npm
+
+      - run: npm ci
+
+      - name: Build for Sepolia
+        env:
+          # Point to Sepolia testnet (change to 1 for Mainnet later)
+          REACT_APP_CHAIN_ID: "11155111"
+          REACT_APP_CONTRACT_ADDRESS: ${{ secrets.REACT_APP_CONTRACT_ADDRESS_PROD }}
+          REACT_APP_TOKEN_MANAGER_ADDRESS: ${{ secrets.REACT_APP_TOKEN_MANAGER_ADDRESS_PROD }}
+          REACT_APP_VOTING_PAYMASTER_ADDRESS: ${{ secrets.REACT_APP_VOTING_PAYMASTER_ADDRESS_PROD }}
+          REACT_APP_SECRET_BALLOT_MANAGER_ADDRESS: ${{ secrets.REACT_APP_SECRET_BALLOT_MANAGER_ADDRESS_PROD }}
+          REACT_APP_FRANCHISE_MANAGER_ADDRESS: ${{ secrets.REACT_APP_FRANCHISE_MANAGER_ADDRESS_PROD }}
+          REACT_APP_VOTING_READER_ADDRESS: ${{ secrets.REACT_APP_VOTING_READER_ADDRESS_PROD }}
+          REACT_APP_REFRESH_INTERVAL: "15000"
+          REACT_APP_HARDHAT_RPC: ""
+          PUBLIC_URL: /stunning-disco
+        run: npm run build
+
+      # Handle client-side routing: copy index.html → 404.html so
+      # GitHub Pages serves the SPA for any deep-link path
+      - name: Create 404 fallback for SPA routing
+        run: cp build/index.html build/404.html
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: build
+
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
+
+  # -------------------------------------------------------------------
+  # 3. Build Docker image & push to GitHub Container Registry
+  # -------------------------------------------------------------------
+  build-and-push:
+    name: Build & Push (${{ matrix.env }})
+    needs: test
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      matrix:
+        include:
+          - env: test
+            branch: develop
+            chain_id: "11155111"
+            refresh: "15000"
+          - env: prod
+            branch: main
+            chain_id: "11155111"
+            refresh: "15000"
+    steps:
+      - uses: actions/checkout@v4
+        if: github.ref == format('refs/heads/{0}', matrix.branch)
+
+      - name: Log in to GHCR
+        if: github.ref == format('refs/heads/{0}', matrix.branch)
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set contract addresses
+        if: github.ref == format('refs/heads/{0}', matrix.branch)
+        run: |
+          if [ "${{ matrix.env }}" = "test" ]; then
+            echo "CONTRACT=${{ secrets.REACT_APP_CONTRACT_ADDRESS_TEST }}" >> $GITHUB_ENV
+            echo "TOKEN_MGR=${{ secrets.REACT_APP_TOKEN_MANAGER_ADDRESS_TEST }}" >> $GITHUB_ENV
+            echo "PAYMASTER=${{ secrets.REACT_APP_VOTING_PAYMASTER_ADDRESS_TEST }}" >> $GITHUB_ENV
+            echo "SBM=${{ secrets.REACT_APP_SECRET_BALLOT_MANAGER_ADDRESS_TEST }}" >> $GITHUB_ENV
+            echo "FRANCHISE=${{ secrets.REACT_APP_FRANCHISE_MANAGER_ADDRESS_TEST }}" >> $GITHUB_ENV
+            echo "READER=${{ secrets.REACT_APP_VOTING_READER_ADDRESS_TEST }}" >> $GITHUB_ENV
+          else
+            echo "CONTRACT=${{ secrets.REACT_APP_CONTRACT_ADDRESS_PROD }}" >> $GITHUB_ENV
+            echo "TOKEN_MGR=${{ secrets.REACT_APP_TOKEN_MANAGER_ADDRESS_PROD }}" >> $GITHUB_ENV
+            echo "PAYMASTER=${{ secrets.REACT_APP_VOTING_PAYMASTER_ADDRESS_PROD }}" >> $GITHUB_ENV
+            echo "SBM=${{ secrets.REACT_APP_SECRET_BALLOT_MANAGER_ADDRESS_PROD }}" >> $GITHUB_ENV
+            echo "FRANCHISE=${{ secrets.REACT_APP_FRANCHISE_MANAGER_ADDRESS_PROD }}" >> $GITHUB_ENV
+            echo "READER=${{ secrets.REACT_APP_VOTING_READER_ADDRESS_PROD }}" >> $GITHUB_ENV
+          fi
+
+      - name: Build & push Docker image
+        if: github.ref == format('refs/heads/{0}', matrix.branch)
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: true
+          tags: |
+            ${{ env.IMAGE_NAME }}:${{ matrix.env }}
+            ${{ env.IMAGE_NAME }}:${{ matrix.env }}-${{ github.sha }}
+          build-args: |
+            REACT_APP_CONTRACT_ADDRESS=${{ env.CONTRACT }}
+            REACT_APP_TOKEN_MANAGER_ADDRESS=${{ env.TOKEN_MGR }}
+            REACT_APP_VOTING_PAYMASTER_ADDRESS=${{ env.PAYMASTER }}
+            REACT_APP_SECRET_BALLOT_MANAGER_ADDRESS=${{ env.SBM }}
+            REACT_APP_FRANCHISE_MANAGER_ADDRESS=${{ env.FRANCHISE }}
+            REACT_APP_VOTING_READER_ADDRESS=${{ env.READER }}
+            REACT_APP_CHAIN_ID=${{ matrix.chain_id }}
+            REACT_APP_REFRESH_INTERVAL=${{ matrix.refresh }}

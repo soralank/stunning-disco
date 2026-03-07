@@ -1,0 +1,13 @@
+node_modules
+build
+.env
+.env.local
+.env.development
+.env.development.local
+.git
+.github
+npm-debug.log
+.DS_Store
+README.md
+TESTING.md
+docker-compose*.yml
