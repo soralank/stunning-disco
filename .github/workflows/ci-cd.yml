@@ -28,7 +28,7 @@ on:
 
 # Top-level permissions for GitHub Pages deployment
 permissions:
-  contents: read
+  contents: write
   pages: write
   id-token: write
   packages: write
@@ -76,6 +76,8 @@ jobs:
 
       - name: Configure Pages
         uses: actions/configure-pages@v4
+        with:
+          enablement: true
 
       - uses: actions/setup-node@v4
         with:
