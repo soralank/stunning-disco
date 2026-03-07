@@ -1,0 +1,890 @@
+[
+    {
+      "inputs": [
+        {
+          "internalType": "address",
+          "name": "_electionsManager",
+          "type": "address"
+        }
+      ],
+      "stateMutability": "nonpayable",
+      "type": "constructor"
+    },
+    {
+      "inputs": [],
+      "name": "BadPaymaster",
+      "type": "error"
+    },
+    {
+      "inputs": [],
+      "name": "CannotSelfTransfer",
+      "type": "error"
+    },
+    {
+      "inputs": [],
+      "name": "ExceedsPollCap",
+      "type": "error"
+    },
+    {
+      "inputs": [],
+      "name": "FranchiseExhausted",
+      "type": "error"
+    },
+    {
+      "inputs": [],
+      "name": "FranchiseExpired",
+      "type": "error"
+    },
+    {
+      "inputs": [],
+      "name": "FranchiseNotFound",
+      "type": "error"
+    },
+    {
+      "inputs": [],
+      "name": "InsufficientFee",
+      "type": "error"
+    },
+    {
+      "inputs": [],
+      "name": "InvalidPollCount",
+      "type": "error"
+    },
+    {
+      "inputs": [],
+      "name": "NoFeesToWithdraw",
+      "type": "error"
+    },
+    {
+      "inputs": [],
+      "name": "NoFranchise",
+      "type": "error"
+    },
+    {
+      "inputs": [],
+      "name": "NoPlainEther",
+      "type": "error"
+    },
+    {
+      "inputs": [],
+      "name": "NoTransferPending",
+      "type": "error"
+    },
+    {
+      "inputs": [],
+      "name": "OnlyPendingOwner",
+      "type": "error"
+    },
+    {
+      "inputs": [],
+      "name": "OwnerCannotBeFranchisee",
+      "type": "error"
+    },
+    {
+      "inputs": [],
+      "name": "ReentrantCall",
+      "type": "error"
+    },
+    {
+      "inputs": [],
+      "name": "SameAddress",
+      "type": "error"
+    },
+    {
+      "inputs": [],
+      "name": "TargetHasActiveFranchise",
+      "type": "error"
+    },
+    {
+      "inputs": [],
+      "name": "TransferFailed",
+      "type": "error"
+    },
+    {
+      "inputs": [],
+      "name": "TransferPending",
+      "type": "error"
+    },
+    {
+      "inputs": [],
+      "name": "Unauthorized",
+      "type": "error"
+    },
+    {
+      "inputs": [],
+      "name": "UnknownFunction",
+      "type": "error"
+    },
+    {
+      "inputs": [],
+      "name": "ZeroAddress",
+      "type": "error"
+    },
+    {
+      "inputs": [],
+      "name": "ZeroAmount",
+      "type": "error"
+    },
+    {
+      "anonymous": false,
+      "inputs": [
+        {
+          "indexed": true,
+          "internalType": "address",
+          "name": "to",
+          "type": "address"
+        },
+        {
+          "indexed": false,
+          "internalType": "uint256",
+          "name": "amount",
+          "type": "uint256"
+        }
+      ],
+      "name": "FeesWithdrawn",
+      "type": "event"
+    },
+    {
+      "anonymous": false,
+      "inputs": [
+        {
+          "indexed": true,
+          "internalType": "uint256",
+          "name": "franchiseId",
+          "type": "uint256"
+        },
+        {
+          "indexed": true,
+          "internalType": "address",
+          "name": "franchisee",
+          "type": "address"
+        },
+        {
+          "indexed": false,
+          "internalType": "uint256",
+          "name": "expiresAt",
+          "type": "uint256"
+        },
+        {
+          "indexed": false,
+          "internalType": "uint256",
+          "name": "maxPolls",
+          "type": "uint256"
+        },
+        {
+          "indexed": false,
+          "internalType": "uint256",
+          "name": "feePerPoll",
+          "type": "uint256"
+        }
+      ],
+      "name": "FranchiseGranted",
+      "type": "event"
+    },
+    {
+      "anonymous": false,
+      "inputs": [
+        {
+          "indexed": true,
+          "internalType": "uint256",
+          "name": "franchiseId",
+          "type": "uint256"
+        },
+        {
+          "indexed": true,
+          "internalType": "uint256",
+          "name": "pollId",
+          "type": "uint256"
+        },
+        {
+          "indexed": false,
+          "internalType": "uint256",
+          "name": "feePaid",
+          "type": "uint256"
+        }
+      ],
+      "name": "FranchisePollCreated",
+      "type": "event"
+    },
+    {
+      "anonymous": false,
+      "inputs": [
+        {
+          "indexed": true,
+          "internalType": "uint256",
+          "name": "oldFranchiseId",
+          "type": "uint256"
+        },
+        {
+          "indexed": true,
+          "internalType": "uint256",
+          "name": "newFranchiseId",
+          "type": "uint256"
+        },
+        {
+          "indexed": true,
+          "internalType": "address",
+          "name": "franchisee",
+          "type": "address"
+        }
+      ],
+      "name": "FranchiseSuperseded",
+      "type": "event"
+    },
+    {
+      "anonymous": false,
+      "inputs": [
+        {
+          "indexed": true,
+          "internalType": "address",
+          "name": "previousOwner",
+          "type": "address"
+        },
+        {
+          "indexed": true,
+          "internalType": "address",
+          "name": "newOwner",
+          "type": "address"
+        }
+      ],
+      "name": "OwnershipTransferStarted",
+      "type": "event"
+    },
+    {
+      "anonymous": false,
+      "inputs": [
+        {
+          "indexed": true,
+          "internalType": "address",
+          "name": "previousOwner",
+          "type": "address"
+        },
+        {
+          "indexed": true,
+          "internalType": "address",
+          "name": "newOwner",
+          "type": "address"
+        }
+      ],
+      "name": "OwnershipTransferred",
+      "type": "event"
+    },
+    {
+      "anonymous": false,
+      "inputs": [
+        {
+          "indexed": true,
+          "internalType": "uint256",
+          "name": "pollId",
+          "type": "uint256"
+        }
+      ],
+      "name": "PollAdminTransferFailed",
+      "type": "event"
+    },
+    {
+      "anonymous": false,
+      "inputs": [
+        {
+          "indexed": true,
+          "internalType": "uint256",
+          "name": "franchiseId",
+          "type": "uint256"
+        },
+        {
+          "indexed": false,
+          "internalType": "uint256",
+          "name": "additionalPolls",
+          "type": "uint256"
+        },
+        {
+          "indexed": false,
+          "internalType": "uint256",
+          "name": "newMaxPolls",
+          "type": "uint256"
+        }
+      ],
+      "name": "PollsAdded",
+      "type": "event"
+    },
+    {
+      "anonymous": false,
+      "inputs": [
+        {
+          "indexed": true,
+          "internalType": "uint256",
+          "name": "franchiseId",
+          "type": "uint256"
+        },
+        {
+          "indexed": true,
+          "internalType": "address",
+          "name": "oldFranchisee",
+          "type": "address"
+        },
+        {
+          "indexed": true,
+          "internalType": "address",
+          "name": "newFranchisee",
+          "type": "address"
+        }
+      ],
+      "name": "TransferApproved",
+      "type": "event"
+    },
+    {
+      "anonymous": false,
+      "inputs": [
+        {
+          "indexed": false,
+          "internalType": "uint256",
+          "name": "fee",
+          "type": "uint256"
+        }
+      ],
+      "name": "TransferFeeSet",
+      "type": "event"
+    },
+    {
+      "anonymous": false,
+      "inputs": [
+        {
+          "indexed": true,
+          "internalType": "uint256",
+          "name": "franchiseId",
+          "type": "uint256"
+        }
+      ],
+      "name": "TransferRejected",
+      "type": "event"
+    },
+    {
+      "anonymous": false,
+      "inputs": [
+        {
+          "indexed": true,
+          "internalType": "uint256",
+          "name": "franchiseId",
+          "type": "uint256"
+        },
+        {
+          "indexed": true,
+          "internalType": "address",
+          "name": "from",
+          "type": "address"
+        },
+        {
+          "indexed": true,
+          "internalType": "address",
+          "name": "to",
+          "type": "address"
+        },
+        {
+          "indexed": false,
+          "internalType": "uint256",
+          "name": "feePaid",
+          "type": "uint256"
+        }
+      ],
+      "name": "TransferRequested",
+      "type": "event"
+    },
+    {
+      "stateMutability": "payable",
+      "type": "fallback"
+    },
+    {
+      "inputs": [],
+      "name": "acceptOwnership",
+      "outputs": [],
+      "stateMutability": "nonpayable",
+      "type": "function"
+    },
+    {
+      "inputs": [
+        {
+          "internalType": "uint256",
+          "name": "franchiseId",
+          "type": "uint256"
+        },
+        {
+          "internalType": "uint256",
+          "name": "additionalPolls",
+          "type": "uint256"
+        }
+      ],
+      "name": "addPolls",
+      "outputs": [],
+      "stateMutability": "nonpayable",
+      "type": "function"
+    },
+    {
+      "inputs": [
+        {
+          "internalType": "uint256",
+          "name": "franchiseId",
+          "type": "uint256"
+        }
+      ],
+      "name": "approveTransfer",
+      "outputs": [],
+      "stateMutability": "nonpayable",
+      "type": "function"
+    },
+    {
+      "inputs": [
+        {
+          "internalType": "string",
+          "name": "title",
+          "type": "string"
+        },
+        {
+          "internalType": "uint256",
+          "name": "startTime",
+          "type": "uint256"
+        },
+        {
+          "internalType": "uint256",
+          "name": "durationSeconds",
+          "type": "uint256"
+        },
+        {
+          "internalType": "bool",
+          "name": "enableTokenVoting",
+          "type": "bool"
+        },
+        {
+          "internalType": "bool",
+          "name": "requireTokenVoting",
+          "type": "bool"
+        }
+      ],
+      "name": "createFranchisePoll",
+      "outputs": [
+        {
+          "internalType": "uint256",
+          "name": "",
+          "type": "uint256"
+        }
+      ],
+      "stateMutability": "payable",
+      "type": "function"
+    },
+    {
+      "inputs": [],
+      "name": "electionsManager",
+      "outputs": [
+        {
+          "internalType": "contract IElectionsManager",
+          "name": "",
+          "type": "address"
+        }
+      ],
+      "stateMutability": "view",
+      "type": "function"
+    },
+    {
+      "inputs": [],
+      "name": "franchiseCount",
+      "outputs": [
+        {
+          "internalType": "uint256",
+          "name": "",
+          "type": "uint256"
+        }
+      ],
+      "stateMutability": "view",
+      "type": "function"
+    },
+    {
+      "inputs": [
+        {
+          "internalType": "uint256",
+          "name": "",
+          "type": "uint256"
+        },
+        {
+          "internalType": "uint256",
+          "name": "",
+          "type": "uint256"
+        }
+      ],
+      "name": "franchisePollIds",
+      "outputs": [
+        {
+          "internalType": "uint256",
+          "name": "",
+          "type": "uint256"
+        }
+      ],
+      "stateMutability": "view",
+      "type": "function"
+    },
+    {
+      "inputs": [
+        {
+          "internalType": "address",
+          "name": "",
+          "type": "address"
+        }
+      ],
+      "name": "franchiseeToId",
+      "outputs": [
+        {
+          "internalType": "uint256",
+          "name": "",
+          "type": "uint256"
+        }
+      ],
+      "stateMutability": "view",
+      "type": "function"
+    },
+    {
+      "inputs": [
+        {
+          "internalType": "uint256",
+          "name": "",
+          "type": "uint256"
+        }
+      ],
+      "name": "franchises",
+      "outputs": [
+        {
+          "internalType": "address",
+          "name": "franchisee",
+          "type": "address"
+        },
+        {
+          "internalType": "uint256",
+          "name": "expiresAt",
+          "type": "uint256"
+        },
+        {
+          "internalType": "uint256",
+          "name": "maxPolls",
+          "type": "uint256"
+        },
+        {
+          "internalType": "uint256",
+          "name": "pollsUsed",
+          "type": "uint256"
+        },
+        {
+          "internalType": "uint256",
+          "name": "feePerPoll",
+          "type": "uint256"
+        },
+        {
+          "internalType": "address",
+          "name": "tokenManager",
+          "type": "address"
+        },
+        {
+          "internalType": "address",
+          "name": "votingPaymaster",
+          "type": "address"
+        }
+      ],
+      "stateMutability": "view",
+      "type": "function"
+    },
+    {
+      "inputs": [
+        {
+          "internalType": "uint256",
+          "name": "franchiseId",
+          "type": "uint256"
+        }
+      ],
+      "name": "getFranchise",
+      "outputs": [
+        {
+          "internalType": "address",
+          "name": "franchisee",
+          "type": "address"
+        },
+        {
+          "internalType": "uint256",
+          "name": "expiresAt",
+          "type": "uint256"
+        },
+        {
+          "internalType": "uint256",
+          "name": "maxPolls",
+          "type": "uint256"
+        },
+        {
+          "internalType": "uint256",
+          "name": "pollsUsed",
+          "type": "uint256"
+        },
+        {
+          "internalType": "uint256",
+          "name": "feePerPoll",
+          "type": "uint256"
+        },
+        {
+          "internalType": "bool",
+          "name": "expired",
+          "type": "bool"
+        },
+        {
+          "internalType": "bool",
+          "name": "exhausted",
+          "type": "bool"
+        }
+      ],
+      "stateMutability": "view",
+      "type": "function"
+    },
+    {
+      "inputs": [
+        {
+          "internalType": "uint256",
+          "name": "franchiseId",
+          "type": "uint256"
+        }
+      ],
+      "name": "getFranchisePollIds",
+      "outputs": [
+        {
+          "internalType": "uint256[]",
+          "name": "",
+          "type": "uint256[]"
+        }
+      ],
+      "stateMutability": "view",
+      "type": "function"
+    },
+    {
+      "inputs": [
+        {
+          "internalType": "address",
+          "name": "franchisee",
+          "type": "address"
+        },
+        {
+          "internalType": "uint256",
+          "name": "durationSeconds",
+          "type": "uint256"
+        },
+        {
+          "internalType": "uint256",
+          "name": "maxPolls",
+          "type": "uint256"
+        },
+        {
+          "internalType": "uint256",
+          "name": "feePerPoll",
+          "type": "uint256"
+        },
+        {
+          "internalType": "address",
+          "name": "tokenManager",
+          "type": "address"
+        },
+        {
+          "internalType": "address",
+          "name": "votingPaymaster",
+          "type": "address"
+        }
+      ],
+      "name": "grantFranchise",
+      "outputs": [
+        {
+          "internalType": "uint256",
+          "name": "",
+          "type": "uint256"
+        }
+      ],
+      "stateMutability": "nonpayable",
+      "type": "function"
+    },
+    {
+      "inputs": [
+        {
+          "internalType": "uint256",
+          "name": "franchiseId",
+          "type": "uint256"
+        }
+      ],
+      "name": "isFranchiseActive",
+      "outputs": [
+        {
+          "internalType": "bool",
+          "name": "",
+          "type": "bool"
+        }
+      ],
+      "stateMutability": "view",
+      "type": "function"
+    },
+    {
+      "inputs": [],
+      "name": "owner",
+      "outputs": [
+        {
+          "internalType": "address",
+          "name": "",
+          "type": "address"
+        }
+      ],
+      "stateMutability": "view",
+      "type": "function"
+    },
+    {
+      "inputs": [],
+      "name": "pendingOwner",
+      "outputs": [
+        {
+          "internalType": "address",
+          "name": "",
+          "type": "address"
+        }
+      ],
+      "stateMutability": "view",
+      "type": "function"
+    },
+    {
+      "inputs": [],
+      "name": "pendingRefunds",
+      "outputs": [
+        {
+          "internalType": "uint256",
+          "name": "",
+          "type": "uint256"
+        }
+      ],
+      "stateMutability": "view",
+      "type": "function"
+    },
+    {
+      "inputs": [
+        {
+          "internalType": "uint256",
+          "name": "franchiseId",
+          "type": "uint256"
+        }
+      ],
+      "name": "rejectTransfer",
+      "outputs": [],
+      "stateMutability": "nonpayable",
+      "type": "function"
+    },
+    {
+      "inputs": [
+        {
+          "internalType": "uint256",
+          "name": "franchiseId",
+          "type": "uint256"
+        }
+      ],
+      "name": "remainingPolls",
+      "outputs": [
+        {
+          "internalType": "uint256",
+          "name": "",
+          "type": "uint256"
+        }
+      ],
+      "stateMutability": "view",
+      "type": "function"
+    },
+    {
+      "inputs": [
+        {
+          "internalType": "uint256",
+          "name": "franchiseId",
+          "type": "uint256"
+        },
+        {
+          "internalType": "address",
+          "name": "newFranchisee",
+          "type": "address"
+        }
+      ],
+      "name": "requestTransfer",
+      "outputs": [],
+      "stateMutability": "payable",
+      "type": "function"
+    },
+    {
+      "inputs": [
+        {
+          "internalType": "uint256",
+          "name": "_fee",
+          "type": "uint256"
+        }
+      ],
+      "name": "setTransferFee",
+      "outputs": [],
+      "stateMutability": "nonpayable",
+      "type": "function"
+    },
+    {
+      "inputs": [],
+      "name": "transferFee",
+      "outputs": [
+        {
+          "internalType": "uint256",
+          "name": "",
+          "type": "uint256"
+        }
+      ],
+      "stateMutability": "view",
+      "type": "function"
+    },
+    {
+      "inputs": [
+        {
+          "internalType": "address",
+          "name": "newOwner",
+          "type": "address"
+        }
+      ],
+      "name": "transferOwnership",
+      "outputs": [],
+      "stateMutability": "nonpayable",
+      "type": "function"
+    },
+    {
+      "inputs": [
+        {
+          "internalType": "uint256",
+          "name": "",
+          "type": "uint256"
+        }
+      ],
+      "name": "transferRequests",
+      "outputs": [
+        {
+          "internalType": "address",
+          "name": "newFranchisee",
+          "type": "address"
+        },
+        {
+          "internalType": "uint256",
+          "name": "feePaid",
+          "type": "uint256"
+        },
+        {
+          "internalType": "bool",
+          "name": "pending",
+          "type": "bool"
+        }
+      ],
+      "stateMutability": "view",
+      "type": "function"
+    },
+    {
+      "inputs": [],
+      "name": "withdrawFees",
+      "outputs": [],
+      "stateMutability": "nonpayable",
+      "type": "function"
+    },
+    {
+      "stateMutability": "payable",
+      "type": "receive"
+    }
+  ]
