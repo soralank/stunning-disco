@@ -9,16 +9,16 @@ import UpgradeableAdminPage from './pages/UpgradeableAdminPage';
 import UpgradeableVoterPage from './pages/UpgradeableVoterPage';
 import UpgradeableResultsPage from './pages/UpgradeableResultsPage';
 
-const IS_DEV = process.env.NODE_ENV !== 'production';
+const IS_LOCAL_TESTING = process.env.REACT_APP_LOCAL_TESTING === 'true';
 
 export default function App() {
   return (
     <Layout>
       <Routes>
-        <Route path="/" element={<Navigate to={IS_DEV ? "/local/voter" : "/voter"} replace />} />
+        <Route path="/" element={<Navigate to={IS_LOCAL_TESTING ? "/local/voter" : "/voter"} replace />} />
 
-        {/* Local Testing Routes — only available in development builds */}
-        {IS_DEV && (
+        {/* Local Testing Routes — only available when REACT_APP_LOCAL_TESTING=true (npm run dev) */}
+        {IS_LOCAL_TESTING && (
           <>
             <Route path="/local" element={<Navigate to="/local/voter" replace />} />
             <Route path="/local/voter" element={<VoterPage mode="local" />} />

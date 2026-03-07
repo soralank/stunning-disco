@@ -99,7 +99,7 @@ export default function Layout({ children }) {
                 <Link className={loc.pathname === '/voter' ? 'active' : ''} to="/voter">Voter</Link>
                 <Link className={loc.pathname === '/results' ? 'active' : ''} to="/results">Results</Link>
                 <Link to={`${prodUpg}/admin`} style={{ marginLeft: 20, color: '#999' }}>→ Upgradeable</Link>
-                {process.env.NODE_ENV !== 'production' && (
+                {process.env.REACT_APP_LOCAL_TESTING === 'true' && (
                   <Link to="/local/voter" style={{ marginLeft: 8, color: '#999' }}>→ Local Testing</Link>
                 )}
               </>

@@ -3,7 +3,8 @@
 > Copyright © 2026 Ankit Soral. All rights reserved. Proprietary and confidential.
 > Unauthorized use, reproduction, or distribution is prohibited.
 
-**Status:** Frontend and smart contract integration complete. Professional security audit pending.\
+**Status:** Production-ready. Deployed on Sepolia testnet. Professional security audit pending.\
+**Live URL:** [https://soralank.github.io/stunning-disco](https://soralank.github.io/stunning-disco)\
 **Contact:** ankit.soral@outlook.com
 
 ---
@@ -437,7 +438,7 @@ Account #1: 0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d
 **Risk assessment:**
 - These are Hardhat's published default test keys — publicly known and useless on any real network.
 - Used exclusively by local-mode code path (`connectLocalAccount()`) to create `ethers.Wallet` instances without MetaMask.
-- Local-mode routes (`/local/*`) are **excluded from the route tree** in production builds (`NODE_ENV === 'production'`).
+- Local-mode routes (`/local/*`) are **only registered** when `REACT_APP_LOCAL_TESTING=true` (i.e., `npm run dev`). They are **not available** via `npm start`, `npm run build`, Docker, or CI/CD deployments.
 - **However**, the key constants are defined at module scope and **are included in the production JavaScript bundle.** They are inert (no code path references them in production routing) but visible to anyone inspecting the bundle.
 - **Mitigation**: Keys are overridable via `REACT_APP_HARDHAT_ACCOUNTS` environment variable. For production deployments, tree-shaking or code-splitting should be considered to exclude these constants entirely.
 
@@ -497,17 +498,19 @@ This is used for `createPoll()`, `grantFranchise()`, and other write operations.
 
 ### Dual-Mode Architecture
 
-The application operates in two distinct modes, determined by URL path and build configuration:
+The application operates in two distinct modes, determined by URL path and environment configuration:
 
-| Aspect | Local Mode (`/local/*`) | Production Mode (`/*`) |
+| Aspect | Local Dev Mode (`/local/*`) | Production Mode (`/*`) |
 |---|---|---|
 | Provider | `JsonRpcProvider` → direct RPC to Hardhat | `BrowserProvider` → MetaMask / injected wallet |
 | Authentication | Click account buttons → `ethers.Wallet` from private key | MetaMask popup → user approves connection |
 | Signing | Direct `wallet.sendTransaction()` | MetaMask signs each tx |
-| Routes available | Dev builds only (`NODE_ENV !== 'production'`) | Always available |
-| Gas payment | Hardhat accounts (10,000 test ETH each) | Real ETH from user's wallet |
-| Gasless relay | Account #0's private key acts as relayer | Self-relay (voter pays gas — see Known Limitations) |
+| Routes available | Only when `REACT_APP_LOCAL_TESTING=true` (`npm run dev`) | Always available |
+| Gas payment | Hardhat accounts (10,000 test ETH each) | Real ETH from user’s wallet |
+| Gasless relay | Account #0’s private key acts as relayer | Self-relay (voter pays gas — see Known Limitations) |
 | Chain enforcement | Skipped (`verifyChainId` silent in dev) | Advisory warning (does not block) |
+
+> **Note:** Local testing routes are gated behind the `REACT_APP_LOCAL_TESTING` environment variable, not `NODE_ENV`. Running `npm start` (even in development) does **not** expose local testing UI. Only `npm run dev` enables it.
 
 ### Environment Variables
 
@@ -523,9 +526,10 @@ The application operates in two distinct modes, determined by URL path and build
 | `REACT_APP_CONTRACT_VERSION` | No | `final` | ABI version for upgradeable routes: `final` (disabled), `1` (V1), or `2` (V2) |
 | `REACT_APP_HARDHAT_RPC` | No | `http://localhost:8545` | RPC endpoint for local mode |
 | `REACT_APP_ABI` | No | Local JSON files | ElectionsManager ABI (JSON string) |
-| `REACT_APP_CHAIN_ID` | No | Skipped | Expected chain ID for verification |
+| `REACT_APP_CHAIN_ID` | No | Skipped | Expected chain ID for verification (11155111 for Sepolia, 1 for Mainnet) |
 | `REACT_APP_REFRESH_INTERVAL` | No | Disabled | Auto-refresh interval (ms) |
-| `REACT_APP_HARDHAT_ACCOUNTS` | No | Hardcoded Hardhat defaults | JSON array of test account objects |
+| `REACT_APP_LOCAL_TESTING` | No | unset | Set to `true` to enable local testing routes (`/local/*`). Only used by `npm run dev`. |
+| `REACT_APP_HARDHAT_ACCOUNTS` | No | Hardcoded Hardhat defaults | JSON array of test account objects (local dev only) |
 | `REACT_APP_IPFS_GATEWAY` | No | — (ipfs:// shown as text) | IPFS gateway URL for resolving `ipfs://` metadata URIs (e.g. `http://127.0.0.1:9090/ipfs/`) |
 
 ### Provider Lifecycle
@@ -621,10 +625,10 @@ If the auto-reveal timer fails to fire before the reveal window closes (e.g., br
 
 ### 5. Test Keys in Production Bundle
 
-Hardhat's default private keys are defined at module scope in `AdminPanel.jsx` and `VoteList.jsx`. While local-mode routes are excluded from the production route tree, the key constants themselves are included in the production JavaScript bundle.
+Hardhat’s default private keys are defined at module scope in `AdminPanel.jsx` and `VoteList.jsx`. While local-mode routes are gated behind `REACT_APP_LOCAL_TESTING` and never registered in production or CI builds, the key constants themselves are still included in the JavaScript bundle.
 
 > **Impact:** Security audit flag. No actual exploit risk (keys are publicly known test keys, useless on real networks).\
-> **Path forward:** Move test account configuration behind dynamic `import()` gated on `NODE_ENV`, or use build-time dead-code elimination.
+> **Path forward:** Move test account configuration behind dynamic `import()` gated on `REACT_APP_LOCAL_TESTING`, or use build-time dead-code elimination.
 
 ### 6. Single-Component Complexity
 
@@ -810,4 +814,4 @@ The change is ~15 lines in `VoteList.jsx`'s `voteGasless()` function — replace
 
 ---
 
-*For setup and deployment, see [README.md](README.md). For step-by-step testing, see [TESTING.md](TESTING.md). For the complete voting workflow, see [WORKFLOW.md](WORKFLOW.md).*
+*For setup and deployment, see [README.md](README.md). For testing, see [TESTING.md](TESTING.md).*

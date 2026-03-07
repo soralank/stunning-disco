@@ -1,19 +1,20 @@
 # =============================================================================
-# CI/CD Pipeline — Build, Test, Dockerize, Deploy
+# CI/CD Pipeline — Build, Test, Deploy to GitHub Pages + Docker
 #
 # Environments:
-#   - test/qa  → push to 'develop' branch  → deploys Sepolia build
-#   - prod     → push to 'main' branch     → deploys Mainnet build
+#   - test/qa  → push to 'develop' branch  → builds Docker image (Sepolia)
+#   - prod     → push to 'main' branch     → deploys to GitHub Pages + Docker
+#
+# GitHub Pages URL:
+#   https://soralank.github.io/stunning-disco
 #
 # Secrets you need to set in GitHub → Settings → Secrets:
-#   DOCKER_USERNAME          — Docker Hub / GHCR username
-#   DOCKER_PASSWORD          — Docker Hub / GHCR token
-#   REACT_APP_CONTRACT_ADDRESS_TEST
-#   REACT_APP_TOKEN_MANAGER_ADDRESS_TEST
-#   REACT_APP_VOTING_PAYMASTER_ADDRESS_TEST
-#   REACT_APP_CONTRACT_ADDRESS_PROD
-#   REACT_APP_TOKEN_MANAGER_ADDRESS_PROD
-#   REACT_APP_VOTING_PAYMASTER_ADDRESS_PROD
+#   REACT_APP_CONTRACT_ADDRESS_PROD        — ElectionManager address (Sepolia)
+#   REACT_APP_TOKEN_MANAGER_ADDRESS_PROD   — TokenManager address (Sepolia)
+#   REACT_APP_VOTING_PAYMASTER_ADDRESS_PROD — VotingPaymaster address (Sepolia)
+#   REACT_APP_CONTRACT_ADDRESS_TEST        — (optional, for develop Docker builds)
+#   REACT_APP_TOKEN_MANAGER_ADDRESS_TEST   — (optional, for develop Docker builds)
+#   REACT_APP_VOTING_PAYMASTER_ADDRESS_TEST — (optional, for develop Docker builds)
 # =============================================================================
 
 name: CI/CD
@@ -23,6 +24,18 @@ on:
     branches: [main, develop]
   pull_request:
     branches: [main, develop]
+
+# Top-level permissions for GitHub Pages deployment
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+  packages: write
+
+# Only allow one Pages deployment at a time
+concurrency:
+  group: pages
+  cancel-in-progress: true
 
 env:
   IMAGE_NAME: ghcr.io/${{ github.repository }}
@@ -46,7 +59,55 @@ jobs:
       - run: CI=true npm test -- --watchAll=false
 
   # -------------------------------------------------------------------
-  # 2. Build Docker image & push to GitHub Container Registry
+  # 2. Build & Deploy to GitHub Pages (main branch only)
+  #    Deploys to: https://soralank.github.io/stunning-disco
+  # -------------------------------------------------------------------
+  deploy-pages:
+    name: Deploy to GitHub Pages
+    needs: test
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 18
+          cache: npm
+
+      - run: npm ci
+
+      - name: Build for Sepolia
+        env:
+          # Point to Sepolia testnet (change to 1 for Mainnet later)
+          REACT_APP_CHAIN_ID: "11155111"
+          REACT_APP_CONTRACT_ADDRESS: ${{ secrets.REACT_APP_CONTRACT_ADDRESS_PROD }}
+          REACT_APP_TOKEN_MANAGER_ADDRESS: ${{ secrets.REACT_APP_TOKEN_MANAGER_ADDRESS_PROD }}
+          REACT_APP_VOTING_PAYMASTER_ADDRESS: ${{ secrets.REACT_APP_VOTING_PAYMASTER_ADDRESS_PROD }}
+          REACT_APP_REFRESH_INTERVAL: "15000"
+          REACT_APP_HARDHAT_RPC: ""
+          PUBLIC_URL: /stunning-disco
+        run: npm run build
+
+      # Handle client-side routing: copy index.html → 404.html so
+      # GitHub Pages serves the SPA for any deep-link path
+      - name: Create 404 fallback for SPA routing
+        run: cp build/index.html build/404.html
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: build
+
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
+
+  # -------------------------------------------------------------------
+  # 3. Build Docker image & push to GitHub Container Registry
   # -------------------------------------------------------------------
   build-and-push:
     name: Build & Push (${{ matrix.env }})
@@ -65,8 +126,8 @@ jobs:
             refresh: "15000"
           - env: prod
             branch: main
-            chain_id: "1"
-            refresh: "30000"
+            chain_id: "11155111"
+            refresh: "15000"
     steps:
       - uses: actions/checkout@v4
         if: github.ref == format('refs/heads/{0}', matrix.branch)

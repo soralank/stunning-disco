@@ -9,9 +9,9 @@ For **system administrators** who manage the voting platform, deploy contracts, 
 ## Key Admin Actions
 
 ### Deploy & Configure
-- Deploy contracts using Hardhat (see [ARCHITECTURE.md](ARCHITECTURE.md) for contract details).
+- Deploy contracts to Sepolia/Mainnet (see [ARCHITECTURE.md](ARCHITECTURE.md) for contract details).
 - Set up franchisees and assign owners.
-- Configure environment variables per [ARCHITECTURE.md § Environment Variables](ARCHITECTURE.md#environment-variables).
+- Configure contract addresses via GitHub Secrets for CI/CD deployment (see [README.md § Required GitHub Secrets](README.md#required-github-secrets)).
 
 ### Create Polls
 When creating a poll, configure:

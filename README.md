@@ -3,18 +3,18 @@
 > Copyright © 2026 Ankit Soral. All rights reserved. Proprietary and confidential.\
 > Unauthorized use, reproduction, or distribution is prohibited.
 
-**Status:** Frontend and smart contract integration complete. Professional security audit pending.\
+**Status:** Production-ready. Deployed on Sepolia testnet. Professional security audit pending.\
+**Live URL:** [https://soralank.github.io/stunning-disco](https://soralank.github.io/stunning-disco)\
 **Contact:** ankit.soral@outlook.com
 
-A decentralized election voting system built with React and Solidity smart contracts. Supports admin controls, voter authorization, time-based voting, gasless meta-transactions (EIP-712), secret ballots (commit-reveal), token-weighted voting, and multi-franchisee poll management.
+A decentralized election voting system built with React and Solidity smart contracts on Ethereum. Supports admin controls, voter authorization, time-based voting, gasless meta-transactions (EIP-712), secret ballots (commit-reveal), token-weighted voting, and multi-franchisee poll management.
 
-## Documentation Map
+## Documentation
 
 | Document | Audience | Purpose |
 |---|---|---|
 | **[ARCHITECTURE.md](ARCHITECTURE.md)** | Engineers, auditors | Trust model, state ownership, failure UX, security analysis, flow diagrams |
-| **[TESTING.md](TESTING.md)** | Developers, QA | Local setup, mode switching, test checklists, troubleshooting |
-| **[WORKFLOW.md](WORKFLOW.md)** | Developers | End-to-end voting walkthrough with exact steps |
+| **[TESTING.md](TESTING.md)** | Developers, QA | CI/CD pipeline, automated tests, local development setup |
 | **[README.admin.md](README.admin.md)** | System admins | Admin-specific operations and best practices |
 | **[README.franchisee.md](README.franchisee.md)** | Franchisee owners | Poll creation, management, and reveal process |
 | **[README.voter.md](README.voter.md)** | Voters | How to vote, reveal, and view results |
@@ -43,50 +43,41 @@ A decentralized election voting system built with React and Solidity smart contr
 
 ## Prerequisites
 
-- Node.js (v14 or later)
-- MetaMask browser extension or compatible Web3 wallet
-- Hardhat (for local blockchain testing)
+- **MetaMask** browser extension (or any compatible Web3 wallet)
+- **Sepolia ETH** for gas fees ([Sepolia faucet](https://sepoliafaucet.com))
+- Node.js v18+ (for development only)
 
-## Quick Setup
+## Production Deployment
 
-### 1. Start Blockchain & Deploy
+The app is deployed automatically via GitHub Actions when you push to `main`:
 
-```bash
-# Terminal 1: Start Hardhat node
-cd /Users/ankit/work/git/votingsystem
-npm install && npx hardhat node
+1. CI runs tests
+2. Builds the React app with Sepolia contract addresses (from GitHub Secrets)
+3. Deploys to **GitHub Pages** at [https://soralank.github.io/stunning-disco](https://soralank.github.io/stunning-disco)
+4. Also pushes a Docker image to `ghcr.io/soralank/stunning-disco:prod`
 
-# Terminal 2: Deploy contracts
-cd /Users/ankit/work/git/votingsystem
-npx hardhat run scripts/deploy-and-setup.js --network localhost
-```
-
-Copy the contract addresses from the deployment output.
-
-### 2. Configure & Start Frontend
-
-```bash
-cd /Users/ankit/work/git/stunning-disco
-npm install
-cp .env.example .env.development
-# Edit .env.development with deployed addresses (see Environment Variables below)
-npm start
-```
-
-App opens at [http://localhost:3000](http://localhost:3000) — defaults to local testing mode.
-
-### 3. MetaMask Network Configuration
+### MetaMask Configuration (Sepolia)
 
 | Setting | Value |
 |---|---|
-| Network Name | Hardhat Local |
-| RPC URL | `http://127.0.0.1:8545` |
-| Chain ID | 31337 |
-| Currency | ETH |
+| Network Name | Sepolia Testnet |
+| RPC URL | `https://rpc.sepolia.org` (or MetaMask built-in) |
+| Chain ID | 11155111 |
+| Currency | SepoliaETH |
+
+### Required GitHub Secrets
+
+Set these in **Settings → Secrets and variables → Actions**:
+
+| Secret | Purpose |
+|---|---|
+| `REACT_APP_CONTRACT_ADDRESS_PROD` | ElectionsManager address on Sepolia |
+| `REACT_APP_TOKEN_MANAGER_ADDRESS_PROD` | TokenManager address on Sepolia |
+| `REACT_APP_VOTING_PAYMASTER_ADDRESS_PROD` | VotingPaymaster address on Sepolia |
 
 ### Environment Variables
 
-See [ARCHITECTURE.md § Environment Variables](ARCHITECTURE.md#environment-variables) for the full reference. Minimum required:
+See [ARCHITECTURE.md § Environment Variables](ARCHITECTURE.md#environment-variables) for the full reference. Key variables:
 
 ```env
 REACT_APP_CONTRACT_ADDRESS=<ElectionsManager address>
@@ -95,50 +86,60 @@ REACT_APP_VOTING_PAYMASTER_ADDRESS=<VotingPaymaster address>
 REACT_APP_SECRET_BALLOT_MANAGER_ADDRESS=<SecretBallotManager address>
 REACT_APP_FRANCHISE_MANAGER_ADDRESS=<FranchiseManager address>
 REACT_APP_VOTING_READER_ADDRESS=<VotingReader address>
-REACT_APP_HARDHAT_RPC=http://127.0.0.1:8545
+REACT_APP_CHAIN_ID=11155111
 
 # For upgradeable contracts (optional):
 REACT_APP_UPGRADEABLE_CONTRACT_ADDRESS=<Proxy address>
 REACT_APP_CONTRACT_VERSION=2  # 1 for V1, 2 for V2
 ```
 
-## Usage Overview
+## Usage
 
 ### For Owners / Admins
 
-1. Open `/local/admin` (local mode) or `/admin` (production with MetaMask)
+1. Open [/admin](https://soralank.github.io/stunning-disco/admin) and connect MetaMask
 2. Create poll → add candidates → authorize voters → wait for expiry → reveal results
+
+See [README.admin.md](README.admin.md) for detailed admin operations.
+
+### For Franchisee Owners
+
+1. Open [/franchisee](https://soralank.github.io/stunning-disco/franchisee) and connect MetaMask
+2. Manage your organization's polls, candidates, and voters
+
+See [README.franchisee.md](README.franchisee.md) for the full guide.
 
 ### For Voters
 
-1. Open `/local/voter` (local mode) or `/voter` (production with MetaMask)
+1. Open [/voter](https://soralank.github.io/stunning-disco/voter) and connect MetaMask
 2. View authorized polls → vote → (for secret ballot: return to reveal after poll ends)
 
-### Upgradeable Contract Routes
+See [README.voter.md](README.voter.md) for the full guide.
 
-The app provides separate routes for the upgradeable (UUPS proxy) contracts:
+### Routes
 
-| Local Route | Production Route | Purpose |
-|---|---|---|
-| `/local/upgradeable/admin` | `/upgradeable/admin` | Admin panel (V1/V2 features) |
-| `/local/upgradeable/voter` | `/upgradeable/voter` | Voter interface (V1/V2) |
-| `/local/upgradeable/results` | `/upgradeable/results` | Results viewer (V1/V2) |
+| Route | Purpose |
+|---|---|
+| `/admin` | Admin panel — poll management, infrastructure |
+| `/franchisee` | Franchisee panel — organization poll management |
+| `/voter` | Voter interface — view polls, cast votes |
+| `/results` | Public results viewer |
+| `/upgradeable/admin` | Admin panel for V1/V2 upgradeable contracts |
+| `/upgradeable/voter` | Voter interface for V1/V2 |
+| `/upgradeable/results` | Results viewer for V1/V2 |
 
-Toggle between Final and Upgradeable using the nav link. Set `REACT_APP_CONTRACT_VERSION=1` (V1) or `2` (V2) in `.env.development`.
+## Local Development
 
-#### Upgrading V1 → V2
-
-If your proxy is running V1 and you want V2 features:
+For local development with a Hardhat blockchain:
 
 ```bash
-# From the votingsystem repo:
-npx hardhat ignition deploy ignition/modules/UpgradeToV2.ts \
-  --parameters ignition/parameters/upgrade-v2.json --network localhost
+npm install
+npm run dev    # Starts with local testing mode enabled
 ```
 
-Or manually via the `_upgrade-to-v2.js` script in this repo. After upgrading, set `REACT_APP_CONTRACT_VERSION=2` and restart the dev server.
+`npm run dev` enables local testing routes (`/local/*`) with Hardhat test accounts — no MetaMask needed. `npm start` runs the app without local testing UI (production-like).
 
-> For detailed step-by-step walkthroughs, see [WORKFLOW.md](WORKFLOW.md).
+See [TESTING.md](TESTING.md) for full local development setup.
 
 ## Contract Functions Reference
 
@@ -171,13 +172,34 @@ Or manually via the `_upgrade-to-v2.js` script in this repo. After upgrading, se
 
 | Problem | Likely Cause | Fix |
 |---|---|---|
-| "Error loading polls" / "could not decode result data" | Wrong contract address or contract not deployed | Verify Hardhat node is running, redeploy, update `.env.development` |
-| Transaction fails silently | Wrong account (owner/admin/voter mismatch) | Check connected account role |
-| MetaMask "wrong network" | Chain ID mismatch | Switch to Hardhat Local (Chain ID 31337) |
-| "Insufficient funds" | Gas fees on production network | Use Hardhat test accounts (10,000 ETH each) for local testing |
+| "Error loading polls" / "could not decode result data" | Wrong contract address or contracts not deployed | Verify contract addresses in GitHub Secrets or `.env` |
+| Transaction fails silently | Wrong account (owner/admin/voter mismatch) | Check connected MetaMask account role |
+| MetaMask "wrong network" | Chain ID mismatch | Switch to Sepolia Testnet (Chain ID 11155111) |
+| "Insufficient funds" | Not enough Sepolia ETH | Get test ETH from a [Sepolia faucet](https://sepoliafaucet.com) |
 | Build errors | Stale dependencies | `rm -rf node_modules package-lock.json && npm install` |
+| Blank page on GitHub Pages | SPA routing issue | Ensure `basename` is set in router (already configured) |
 
-> For comprehensive troubleshooting by mode, see [TESTING.md § Troubleshooting](TESTING.md#troubleshooting).
+> For comprehensive troubleshooting, see [TESTING.md § Troubleshooting](TESTING.md#troubleshooting).
+
+## CI/CD Pipeline
+
+| Trigger | Jobs |
+|---|---|
+| Push to `main` | Test → Build & Deploy to GitHub Pages → Push Docker image (`prod`) |
+| Push to `develop` | Test → Push Docker image (`test`) |
+| Pull request | Test only |
+
+See [.github/workflows/ci-cd.yml](.github/workflows/ci-cd.yml) for the full pipeline.
+
+## Mainnet Migration
+
+When ready to move from Sepolia to Ethereum Mainnet:
+
+1. Update `REACT_APP_CHAIN_ID` from `11155111` to `1` in CI/CD workflow (2 places)
+2. Update GitHub Secrets with mainnet contract addresses
+3. Push to `main`
+
+See [ARCHITECTURE.md](ARCHITECTURE.md) for full details.
 
 ## License
 
@@ -185,16 +207,11 @@ Copyright © 2026 Ankit Soral. All rights reserved. See [LICENSE.txt](LICENSE.tx
 
 ### Dual-License Consideration
 
-This project is currently under a proprietary all-rights-reserved license. For open-source credibility and community adoption, a dual-license model is under evaluation:
+This project is currently under a proprietary all-rights-reserved license. A dual-license model is under evaluation:
 
 | License | Scope | Audience |
 |---|---|---|
-| **AGPL-3.0** (or GPL-3.0) | Default open-source license | Community users, academic use, public forks |
-| **Commercial License** | Proprietary use, SaaS deployment, white-labeling | Enterprise customers, closed-source integrators |
-
-**Why dual-license:**
-- AGPL's copyleft requirement (any network-accessible derivative must publish source) protects the project from closed-source exploitation while allowing genuine open-source use.
-- A separate commercial license provides an explicit path for enterprises that cannot comply with AGPL's source disclosure requirements.
-- This model is well-established in production blockchain tooling (e.g., OpenZeppelin, Foundry, Hardhat plugins).
+| **AGPL-3.0** (or GPL-3.0) | Default open-source license | Community, academic, public forks |
+| **Commercial License** | Proprietary use, SaaS, white-labeling | Enterprise customers |
 
 **Status:** Under evaluation. Contact ankit.soral@outlook.com for licensing inquiries.

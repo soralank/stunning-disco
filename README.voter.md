@@ -7,7 +7,7 @@ For **voters** participating in polls.
 ---
 
 ## Getting Started
-- Connect your wallet (MetaMask) or click an account button (local/test mode).
+- Open [/voter](https://soralank.github.io/stunning-disco/voter) and connect your MetaMask wallet.
 - The voter page shows all polls you are authorized to vote in.
 
 ## Voting

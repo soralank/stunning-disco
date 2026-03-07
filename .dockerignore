@@ -9,7 +9,5 @@ build
 npm-debug.log
 .DS_Store
 README.md
-QUICKSTART.md
 TESTING.md
-WORKFLOW.md
 docker-compose*.yml
