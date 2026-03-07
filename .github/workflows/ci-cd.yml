@@ -8,14 +8,10 @@
 # GitHub Pages URL:
 #   https://soralank.github.io/stunning-disco
 #
-# Secrets you need to set in GitHub → Settings → Secrets:
-#   REACT_APP_CONTRACT_ADDRESS_PROD              — ElectionsManager (Sepolia)
-#   REACT_APP_TOKEN_MANAGER_ADDRESS_PROD         — TokenManager (Sepolia)
-#   REACT_APP_VOTING_PAYMASTER_ADDRESS_PROD      — VotingPaymaster (Sepolia)
-#   REACT_APP_SECRET_BALLOT_MANAGER_ADDRESS_PROD — SecretBallotManager (Sepolia)
-#   REACT_APP_FRANCHISE_MANAGER_ADDRESS_PROD     — FranchiseManager (Sepolia)
-#   REACT_APP_VOTING_READER_ADDRESS_PROD         — VotingReader (Sepolia)
-#   (Optional for develop Docker builds: same keys with _TEST suffix)
+# Contract addresses are read from committed env files:
+#   .env.production  — used by `npm run build` (GitHub Pages + Docker)
+#   .env.test        — used by `npm test` (CI)
+#   No GitHub Secrets needed for contract addresses.
 # =============================================================================
 
 name: CI/CD
@@ -86,24 +82,8 @@ jobs:
 
       - name: Build for Sepolia
         env:
-          # Point to Sepolia testnet (change to 1 for Mainnet later)
-          REACT_APP_CHAIN_ID: "11155111"
-          REACT_APP_CONTRACT_ADDRESS: ${{ secrets.REACT_APP_CONTRACT_ADDRESS_PROD }}
-          REACT_APP_TOKEN_MANAGER_ADDRESS: ${{ secrets.REACT_APP_TOKEN_MANAGER_ADDRESS_PROD }}
-          REACT_APP_VOTING_PAYMASTER_ADDRESS: ${{ secrets.REACT_APP_VOTING_PAYMASTER_ADDRESS_PROD }}
-          REACT_APP_SECRET_BALLOT_MANAGER_ADDRESS: ${{ secrets.REACT_APP_SECRET_BALLOT_MANAGER_ADDRESS_PROD }}
-          REACT_APP_FRANCHISE_MANAGER_ADDRESS: ${{ secrets.REACT_APP_FRANCHISE_MANAGER_ADDRESS_PROD }}
-          REACT_APP_VOTING_READER_ADDRESS: ${{ secrets.REACT_APP_VOTING_READER_ADDRESS_PROD }}
-          REACT_APP_REFRESH_INTERVAL: "15000"
-          REACT_APP_HARDHAT_RPC: ""
-          REACT_APP_CONTRACT_VERSION: "final"
-          REACT_APP_IPFS_GATEWAY: "https://ipfs.io/ipfs/"
           PUBLIC_URL: /stunning-disco
-        run: |
-          echo "CONTRACT_ADDRESS is: ${REACT_APP_CONTRACT_ADDRESS:+SET (${#REACT_APP_CONTRACT_ADDRESS} chars)}"
-          echo "TOKEN_MANAGER is: ${REACT_APP_TOKEN_MANAGER_ADDRESS:+SET (${#REACT_APP_TOKEN_MANAGER_ADDRESS} chars)}"
-          echo "FRANCHISE_MANAGER is: ${REACT_APP_FRANCHISE_MANAGER_ADDRESS:+SET (${#REACT_APP_FRANCHISE_MANAGER_ADDRESS} chars)}"
-          npm run build
+        run: npm run build
 
       # Handle client-side routing: copy index.html → 404.html so
       # GitHub Pages serves the SPA for any deep-link path
@@ -153,25 +133,6 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Set contract addresses
-        if: github.ref == format('refs/heads/{0}', matrix.branch)
-        run: |
-          if [ "${{ matrix.env }}" = "test" ]; then
-            echo "CONTRACT=${{ secrets.REACT_APP_CONTRACT_ADDRESS_TEST }}" >> $GITHUB_ENV
-            echo "TOKEN_MGR=${{ secrets.REACT_APP_TOKEN_MANAGER_ADDRESS_TEST }}" >> $GITHUB_ENV
-            echo "PAYMASTER=${{ secrets.REACT_APP_VOTING_PAYMASTER_ADDRESS_TEST }}" >> $GITHUB_ENV
-            echo "SBM=${{ secrets.REACT_APP_SECRET_BALLOT_MANAGER_ADDRESS_TEST }}" >> $GITHUB_ENV
-            echo "FRANCHISE=${{ secrets.REACT_APP_FRANCHISE_MANAGER_ADDRESS_TEST }}" >> $GITHUB_ENV
-            echo "READER=${{ secrets.REACT_APP_VOTING_READER_ADDRESS_TEST }}" >> $GITHUB_ENV
-          else
-            echo "CONTRACT=${{ secrets.REACT_APP_CONTRACT_ADDRESS_PROD }}" >> $GITHUB_ENV
-            echo "TOKEN_MGR=${{ secrets.REACT_APP_TOKEN_MANAGER_ADDRESS_PROD }}" >> $GITHUB_ENV
-            echo "PAYMASTER=${{ secrets.REACT_APP_VOTING_PAYMASTER_ADDRESS_PROD }}" >> $GITHUB_ENV
-            echo "SBM=${{ secrets.REACT_APP_SECRET_BALLOT_MANAGER_ADDRESS_PROD }}" >> $GITHUB_ENV
-            echo "FRANCHISE=${{ secrets.REACT_APP_FRANCHISE_MANAGER_ADDRESS_PROD }}" >> $GITHUB_ENV
-            echo "READER=${{ secrets.REACT_APP_VOTING_READER_ADDRESS_PROD }}" >> $GITHUB_ENV
-          fi
-
       - name: Build & push Docker image
         if: github.ref == format('refs/heads/{0}', matrix.branch)
         uses: docker/build-push-action@v5
@@ -181,12 +142,3 @@ jobs:
           tags: |
             ${{ env.IMAGE_NAME }}:${{ matrix.env }}
             ${{ env.IMAGE_NAME }}:${{ matrix.env }}-${{ github.sha }}
-          build-args: |
-            REACT_APP_CONTRACT_ADDRESS=${{ env.CONTRACT }}
-            REACT_APP_TOKEN_MANAGER_ADDRESS=${{ env.TOKEN_MGR }}
-            REACT_APP_VOTING_PAYMASTER_ADDRESS=${{ env.PAYMASTER }}
-            REACT_APP_SECRET_BALLOT_MANAGER_ADDRESS=${{ env.SBM }}
-            REACT_APP_FRANCHISE_MANAGER_ADDRESS=${{ env.FRANCHISE }}
-            REACT_APP_VOTING_READER_ADDRESS=${{ env.READER }}
-            REACT_APP_CHAIN_ID=${{ matrix.chain_id }}
-            REACT_APP_REFRESH_INTERVAL=${{ matrix.refresh }}
