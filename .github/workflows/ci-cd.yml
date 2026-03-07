@@ -9,12 +9,13 @@
 #   https://soralank.github.io/stunning-disco
 #
 # Secrets you need to set in GitHub → Settings → Secrets:
-#   REACT_APP_CONTRACT_ADDRESS_PROD        — ElectionManager address (Sepolia)
-#   REACT_APP_TOKEN_MANAGER_ADDRESS_PROD   — TokenManager address (Sepolia)
-#   REACT_APP_VOTING_PAYMASTER_ADDRESS_PROD — VotingPaymaster address (Sepolia)
-#   REACT_APP_CONTRACT_ADDRESS_TEST        — (optional, for develop Docker builds)
-#   REACT_APP_TOKEN_MANAGER_ADDRESS_TEST   — (optional, for develop Docker builds)
-#   REACT_APP_VOTING_PAYMASTER_ADDRESS_TEST — (optional, for develop Docker builds)
+#   REACT_APP_CONTRACT_ADDRESS_PROD              — ElectionsManager (Sepolia)
+#   REACT_APP_TOKEN_MANAGER_ADDRESS_PROD         — TokenManager (Sepolia)
+#   REACT_APP_VOTING_PAYMASTER_ADDRESS_PROD      — VotingPaymaster (Sepolia)
+#   REACT_APP_SECRET_BALLOT_MANAGER_ADDRESS_PROD — SecretBallotManager (Sepolia)
+#   REACT_APP_FRANCHISE_MANAGER_ADDRESS_PROD     — FranchiseManager (Sepolia)
+#   REACT_APP_VOTING_READER_ADDRESS_PROD         — VotingReader (Sepolia)
+#   (Optional for develop Docker builds: same keys with _TEST suffix)
 # =============================================================================
 
 name: CI/CD
@@ -87,6 +88,9 @@ jobs:
           REACT_APP_CONTRACT_ADDRESS: ${{ secrets.REACT_APP_CONTRACT_ADDRESS_PROD }}
           REACT_APP_TOKEN_MANAGER_ADDRESS: ${{ secrets.REACT_APP_TOKEN_MANAGER_ADDRESS_PROD }}
           REACT_APP_VOTING_PAYMASTER_ADDRESS: ${{ secrets.REACT_APP_VOTING_PAYMASTER_ADDRESS_PROD }}
+          REACT_APP_SECRET_BALLOT_MANAGER_ADDRESS: ${{ secrets.REACT_APP_SECRET_BALLOT_MANAGER_ADDRESS_PROD }}
+          REACT_APP_FRANCHISE_MANAGER_ADDRESS: ${{ secrets.REACT_APP_FRANCHISE_MANAGER_ADDRESS_PROD }}
+          REACT_APP_VOTING_READER_ADDRESS: ${{ secrets.REACT_APP_VOTING_READER_ADDRESS_PROD }}
           REACT_APP_REFRESH_INTERVAL: "15000"
           REACT_APP_HARDHAT_RPC: ""
           PUBLIC_URL: /stunning-disco
@@ -147,10 +151,16 @@ jobs:
             echo "CONTRACT=${{ secrets.REACT_APP_CONTRACT_ADDRESS_TEST }}" >> $GITHUB_ENV
             echo "TOKEN_MGR=${{ secrets.REACT_APP_TOKEN_MANAGER_ADDRESS_TEST }}" >> $GITHUB_ENV
             echo "PAYMASTER=${{ secrets.REACT_APP_VOTING_PAYMASTER_ADDRESS_TEST }}" >> $GITHUB_ENV
+            echo "SBM=${{ secrets.REACT_APP_SECRET_BALLOT_MANAGER_ADDRESS_TEST }}" >> $GITHUB_ENV
+            echo "FRANCHISE=${{ secrets.REACT_APP_FRANCHISE_MANAGER_ADDRESS_TEST }}" >> $GITHUB_ENV
+            echo "READER=${{ secrets.REACT_APP_VOTING_READER_ADDRESS_TEST }}" >> $GITHUB_ENV
           else
             echo "CONTRACT=${{ secrets.REACT_APP_CONTRACT_ADDRESS_PROD }}" >> $GITHUB_ENV
             echo "TOKEN_MGR=${{ secrets.REACT_APP_TOKEN_MANAGER_ADDRESS_PROD }}" >> $GITHUB_ENV
             echo "PAYMASTER=${{ secrets.REACT_APP_VOTING_PAYMASTER_ADDRESS_PROD }}" >> $GITHUB_ENV
+            echo "SBM=${{ secrets.REACT_APP_SECRET_BALLOT_MANAGER_ADDRESS_PROD }}" >> $GITHUB_ENV
+            echo "FRANCHISE=${{ secrets.REACT_APP_FRANCHISE_MANAGER_ADDRESS_PROD }}" >> $GITHUB_ENV
+            echo "READER=${{ secrets.REACT_APP_VOTING_READER_ADDRESS_PROD }}" >> $GITHUB_ENV
           fi
 
       - name: Build & push Docker image
@@ -166,5 +176,8 @@ jobs:
             REACT_APP_CONTRACT_ADDRESS=${{ env.CONTRACT }}
             REACT_APP_TOKEN_MANAGER_ADDRESS=${{ env.TOKEN_MGR }}
             REACT_APP_VOTING_PAYMASTER_ADDRESS=${{ env.PAYMASTER }}
+            REACT_APP_SECRET_BALLOT_MANAGER_ADDRESS=${{ env.SBM }}
+            REACT_APP_FRANCHISE_MANAGER_ADDRESS=${{ env.FRANCHISE }}
+            REACT_APP_VOTING_READER_ADDRESS=${{ env.READER }}
             REACT_APP_CHAIN_ID=${{ matrix.chain_id }}
             REACT_APP_REFRESH_INTERVAL=${{ matrix.refresh }}
