@@ -1,15 +1,56 @@
-import React, { useEffect, useState } from 'react';
-import { getProvider, getContract } from '../contract';
+import React, { useEffect, useState, useMemo } from 'react';
+import { getProvider, getContract, getSecretBallotManagerContract, getVotingReaderContract, resolveIpfsUri } from '../contract';
+import { ethers } from 'ethers';
+import Pagination from './Pagination';
+import SearchBar from './SearchBar';
 
 export default function ResultsList({ mode = 'production' }) {
   const [polls, setPolls] = useState([]);
   const [loading, setLoading] = useState(true);
   const [status, setStatus] = useState(null);
+  const [expandedResult, setExpandedResult] = useState(null);
+
+  // Search & pagination
+  const [resultsSearch, setResultsSearch] = useState('');
+  const [resultsStatusFilter, setResultsStatusFilter] = useState('all');
+  const [resultsPage, setResultsPage] = useState(1);
+  const [resultsPageSize, setResultsPageSize] = useState(10);
+
+  const filteredResults = useMemo(() => {
+    let list = polls;
+    if (resultsSearch.trim()) {
+      const q = resultsSearch.trim().toLowerCase();
+      list = list.filter(p => p.title.toLowerCase().includes(q) || String(p.id).includes(q) || (p.admin && p.admin.toLowerCase().includes(q)));
+    }
+    if (resultsStatusFilter !== 'all') {
+      list = list.filter(p => {
+        if (resultsStatusFilter === 'revealed') return !!p.revealed;
+        if (resultsStatusFilter === 'ended') return !!p.ended && !p.revealed;
+        if (resultsStatusFilter === 'active') return !!p.active;
+        return true;
+      });
+    }
+    return list;
+  }, [polls, resultsSearch, resultsStatusFilter]);
+
+  const resultsPageItems = useMemo(() => {
+    const start = (resultsPage - 1) * resultsPageSize;
+    return filteredResults.slice(start, start + resultsPageSize);
+  }, [filteredResults, resultsPage, resultsPageSize]);
+
+  // In local mode, connect directly to Hardhat RPC to avoid MetaMask intercepting
+  function getEffectiveProvider() {
+    if (mode === 'local') {
+      const rpc = process.env.REACT_APP_HARDHAT_RPC || 'http://127.0.0.1:8545';
+      return new ethers.JsonRpcProvider(rpc);
+    }
+    return getProvider();
+  }
 
   async function loadResults() {
     setLoading(true);
     try {
-      const provider = getProvider();
+      const provider = getEffectiveProvider();
       const contract = getContract(provider);
 
       let pollsCount = 0;
@@ -24,14 +65,10 @@ export default function ResultsList({ mode = 'production' }) {
             const result = await contract.pollsCount();
             pollsCount = Number(result);
           } catch (e2) {
-            try {
-              const result = await contract.pollCount();
-              pollsCount = Number(result);
-            } catch (e3) {
+              console.error('Cannot read pollsCount — tried getPollsCount() and pollsCount()');
               setStatus('Error: Cannot read polls from contract');
               setLoading(false);
               return;
-            }
           }
         }
       }
@@ -46,6 +83,7 @@ export default function ResultsList({ mode = 'production' }) {
           if (!poll || !poll.exists) continue;
 
           const endTime = Number(poll.endTime);
+          const startTime = Number(poll.startTime);
           let status;
 
           try {
@@ -70,8 +108,12 @@ export default function ResultsList({ mode = 'production' }) {
           if (typeof status.revealed !== 'boolean') {
             status.revealed = poll.revealed;
           }
-
-          if (!status.ended) continue;
+          if (typeof status.started !== 'boolean') {
+            status.started = startTime ? startTime <= nowTs : true;
+          }
+          if (typeof status.active !== 'boolean') {
+            status.active = status.started && !status.ended;
+          }
 
           const optionsCount = await contract.getOptionsCount(i);
           const options = [];
@@ -85,6 +127,7 @@ export default function ResultsList({ mode = 'production' }) {
           }
 
           let winner = null;
+          let tieResult = null;
           if (status.revealed) {
             try {
               const winnerResult = await contract.getWinner(i);
@@ -96,19 +139,60 @@ export default function ResultsList({ mode = 'production' }) {
             } catch (err) {
               winner = null;
             }
+            // Detect ties: multiple candidates with the same highest vote count
+            const maxVotes = Math.max(...options.map(o => o.votes ?? 0));
+            if (maxVotes > 0) {
+              const topCandidates = options.filter(o => (o.votes ?? 0) === maxVotes);
+              if (topCandidates.length > 1) {
+                tieResult = { isTie: true, votes: maxVotes, candidates: topCandidates };
+              }
+            }
           }
 
           results.push({
             id: i,
             title: poll.title,
             admin: poll.admin,
-            startTime: Number(poll.startTime),
+            startTime,
             endTime,
             totalVotes: status.revealed ? Number(await contract.getTotalVotes(i)) : null,
             options,
             winner,
-            revealed: status.revealed
+            tieResult,
+            revealed: status.revealed,
+            ended: status.ended,
+            active: status.active,
+            started: status.started
           });
+
+          // Augment with new feature flags
+          const lastResult = results[results.length - 1];
+          try { lastResult.isSecretBallot = await contract.secretBallot(i); } catch { lastResult.isSecretBallot = false; }
+          try {
+            const reader = getVotingReaderContract(provider);
+            lastResult.quadraticEnabled = await reader.isQuadraticVotingEnabled(i);
+          } catch { lastResult.quadraticEnabled = false; }
+          try {
+            const reader = getVotingReaderContract(provider);
+            lastResult.maxChoices = Number(await reader.getPollMaxChoices(i));
+          } catch { lastResult.maxChoices = 0; }
+          try { lastResult.delegationEnabled = await contract.delegationEnabled(i); } catch { lastResult.delegationEnabled = false; }
+          try { lastResult.metadataURI = await contract.getPollMetadata(i); } catch { lastResult.metadataURI = ''; }
+
+          // Secret ballot status
+          if (lastResult.isSecretBallot) {
+            try {
+              const sbmContract = getSecretBallotManagerContract(provider);
+              const sbStatus = await sbmContract.getSecretBallotStatus(i);
+              lastResult.sbStatus = {
+                commits: Number(sbStatus.commits ?? sbStatus[0]),
+                reveals: Number(sbStatus.reveals ?? sbStatus[1]),
+                inCommitPhase: sbStatus.inCommitPhase ?? sbStatus[3],
+                inRevealPhase: sbStatus.inRevealPhase ?? sbStatus[4]
+              };
+            } catch { lastResult.sbStatus = null; }
+          }
+
         } catch (err) {
           console.warn(`Failed to load results for poll #${i}:`, err.message);
         }
@@ -124,15 +208,18 @@ export default function ResultsList({ mode = 'production' }) {
 
   useEffect(() => {
     let resultsInterval;
+    const refreshMs = Number(process.env.REACT_APP_REFRESH_INTERVAL);
 
     const startPolling = () => {
       if (document.visibilityState !== 'visible') return;
       loadResults();
-      resultsInterval = setInterval(() => {
-        if (document.visibilityState === 'visible') {
-          loadResults();
-        }
-      }, 30000);
+      if (refreshMs > 0) {
+        resultsInterval = setInterval(() => {
+          if (document.visibilityState === 'visible') {
+            loadResults();
+          }
+        }, refreshMs);
+      }
     };
 
     const stopPolling = () => {
@@ -176,58 +263,133 @@ export default function ResultsList({ mode = 'production' }) {
       {polls.length === 0 ? (
         <div>
           <div className="empty-state">
-            No results are available yet. Results appear only after a poll ends and is revealed by the owner.
+            No polls found. Create a poll from the admin panel first.
           </div>
         </div>
       ) : (
-        <div>
-          <div className="poll-grid">
-          {polls.map(poll => (
-            <div key={poll.id} className="poll-card">
-              <div className="poll-card__head">
-                <div>
-                  <h4 className="poll-title">Poll #{poll.id}: {poll.title}</h4>
-                  <div className="muted small">Admin: {poll.admin}</div>
-                </div>
-                <span className={`chip ${poll.revealed ? '' : 'chip-warning'}`}>
-                  {poll.revealed ? 'Revealed' : 'Ended'}
-                </span>
-              </div>
-              <div className="poll-meta">
-                <div>
-                  <span>Ended</span>
-                  <strong>{formatDateTime(poll.endTime)}</strong>
-                </div>
-                <div>
-                  <span>Total votes</span>
-                  <strong>{poll.revealed ? poll.totalVotes : 'Hidden'}</strong>
-                </div>
-              </div>
-
-              {poll.revealed && poll.winner && (
-                <div className="winner-card">
-                  <strong>Winner:</strong> {poll.winner.name} ({poll.winner.votes} votes)
-                </div>
-              )}
-              {!poll.revealed && (
-                <div className="info-banner">
-                  Results are hidden until the owner reveals them.
-                </div>
-              )}
-
-              <div className="poll-options">
-                <h5>Candidates</h5>
-                {poll.options.map(option => (
-                  <div key={option.id} className="option-row">
-                    <span>{option.name}</span>
-                    <span className="option-votes">{poll.revealed ? `${option.votes} votes` : '?'}</span>
-                  </div>
-                ))}
-              </div>
-            </div>
-          ))}
+        <section className="panel-card panel-card--wide">
+          <div className="panel-head">
+            <h3>Poll Results ({filteredResults.length} of {polls.length})</h3>
           </div>
-        </div>
+
+          <SearchBar
+            searchTerm={resultsSearch}
+            onSearchChange={(v) => { setResultsSearch(v); setResultsPage(1); }}
+            placeholder="Search by title, admin or ID…"
+            filters={[
+              { id: 'all',      label: 'All',      active: resultsStatusFilter === 'all' },
+              { id: 'revealed', label: 'Revealed', active: resultsStatusFilter === 'revealed' },
+              { id: 'ended',    label: 'Ended',    active: resultsStatusFilter === 'ended' },
+              { id: 'active',   label: 'Active',   active: resultsStatusFilter === 'active' },
+            ]}
+            onFilterToggle={(id) => { setResultsStatusFilter(id); setResultsPage(1); }}
+          />
+
+          <div className="data-table-wrap">
+            <table className="data-table">
+              <thead>
+                <tr>
+                  <th>#</th>
+                  <th>Title</th>
+                  <th>Status</th>
+                  <th>Starts</th>
+                  <th>Ends</th>
+                  <th>Votes</th>
+                  <th>Winner</th>
+                  <th></th>
+                </tr>
+              </thead>
+              <tbody>
+                {resultsPageItems.map(poll => {
+                  const statusLabel = poll.revealed ? 'Revealed' : poll.ended ? 'Ended' : poll.active ? 'Active' : !poll.started ? 'Scheduled' : 'Inactive';
+                  const chipClass = poll.revealed ? 'chip-success' : poll.ended ? 'chip-warning' : poll.active ? '' : 'chip-warning';
+                  return (
+                    <React.Fragment key={poll.id}>
+                      <tr>
+                        <td>{poll.id}</td>
+                        <td>{poll.title}</td>
+                        <td><span className={`chip ${chipClass}`}>{statusLabel}</span></td>
+                        <td>{formatDateTime(poll.startTime)}</td>
+                        <td>{formatDateTime(poll.endTime)}</td>
+                        <td>{poll.revealed ? poll.totalVotes : '—'}</td>
+                        <td>
+                          {poll.revealed && poll.tieResult
+                            ? `🤝 Tie (${poll.tieResult.candidates.length}-way, ${poll.tieResult.votes} votes)`
+                            : poll.revealed && poll.winner
+                            ? `🏆 ${poll.winner.name} (${poll.winner.votes})`
+                            : '—'}
+                        </td>
+                        <td>
+                          <button className="btn btn-sm secondary" onClick={() => setExpandedResult(expandedResult === poll.id ? null : poll.id)}>
+                            {expandedResult === poll.id ? 'Hide' : 'Details'}
+                          </button>
+                        </td>
+                      </tr>
+                      {expandedResult === poll.id && (
+                        <tr>
+                          <td colSpan="8" style={{ padding: '0.75rem 1rem', background: 'var(--surface-alt, #f7f8fa)' }}>
+                            <div className="muted small" style={{ marginBottom: '0.5rem' }}>Admin: {poll.admin}</div>
+                            {poll.isSecretBallot && <span className="chip" style={{ marginRight: 4 }}>Secret Ballot</span>}
+                            {poll.quadraticEnabled && <span className="chip" style={{ marginRight: 4 }}>Quadratic</span>}
+                            {poll.maxChoices > 0 && <span className="chip" style={{ marginRight: 4 }}>Multi-choice (max {poll.maxChoices})</span>}
+                            {poll.delegationEnabled && <span className="chip" style={{ marginRight: 4 }}>Delegation</span>}
+                            {poll.isSecretBallot && poll.sbStatus && (
+                              <div className="muted small" style={{ marginTop: 4 }}>
+                                Phase: {poll.sbStatus.inCommitPhase ? 'Commit' : poll.sbStatus.inRevealPhase ? 'Reveal' : 'Closed'} &bull;
+                                Commits: {poll.sbStatus.commits} &bull; Reveals: {poll.sbStatus.reveals}
+                              </div>
+                            )}
+                            {poll.metadataURI && <div className="muted small" style={{ marginTop: 4, wordBreak: 'break-all' }}>Metadata: {(() => { const resolved = resolveIpfsUri(poll.metadataURI); return resolved.startsWith('http') ? <a href={resolved} target="_blank" rel="noopener noreferrer">{poll.metadataURI}</a> : poll.metadataURI; })()}</div>}
+                            {poll.options.length > 0 && (
+                              <div style={{ marginTop: '0.5rem' }}>
+                                <strong>Candidates</strong>
+                                {poll.revealed && poll.tieResult && (
+                                  <div className="winner-card is-tie" style={{ marginTop: '0.5rem' }}>
+                                    <strong>🤝 Tie!</strong> {poll.tieResult.candidates.length} candidates tied with {poll.tieResult.votes} vote{poll.tieResult.votes !== 1 ? 's' : ''} each:
+                                    <div className="tie-candidates">
+                                      {poll.tieResult.candidates.map(c => <span key={c.id} className="chip">{c.name}</span>)}
+                                    </div>
+                                  </div>
+                                )}
+                                {poll.revealed && poll.winner && !poll.tieResult && (
+                                  <div className="winner-card" style={{ marginTop: '0.5rem' }}>
+                                    <strong>🏆 Winner:</strong> {poll.winner.name} ({poll.winner.votes} votes)
+                                  </div>
+                                )}
+                                <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.5rem', marginTop: '0.25rem' }}>
+                                  {poll.options.map(option => (
+                                    <span key={option.id} className="chip">{option.name} {poll.revealed ? `(${option.votes})` : ''}</span>
+                                  ))}
+                                </div>
+                              </div>
+                            )}
+                            {poll.ended && !poll.revealed && (
+                              <div className="info-banner" style={{ marginTop: '0.5rem' }}>Poll ended. Results will be revealed by the owner.</div>
+                            )}
+                            {poll.active && (
+                              <div className="info-banner" style={{ marginTop: '0.5rem' }}>Voting in progress.</div>
+                            )}
+                          </td>
+                        </tr>
+                      )}
+                    </React.Fragment>
+                  );
+                })}
+                {resultsPageItems.length === 0 && (
+                  <tr><td colSpan="8" style={{ textAlign: 'center', padding: '1.5rem' }}>No polls match your search.</td></tr>
+                )}
+              </tbody>
+            </table>
+          </div>
+
+          <Pagination
+            totalItems={filteredResults.length}
+            page={resultsPage}
+            pageSize={resultsPageSize}
+            onPageChange={setResultsPage}
+            onPageSizeChange={(s) => { setResultsPageSize(s); setResultsPage(1); }}
+          />
+        </section>
       )}
     </div>
   );

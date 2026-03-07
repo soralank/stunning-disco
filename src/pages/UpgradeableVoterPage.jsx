@@ -1,23 +1,23 @@
 import React from 'react';
-import VoteList from '../components/VoteList';
+import UpgradeableVoteList from '../components/UpgradeableVoteList';
+import { VERSION_LABEL } from '../utils/contractVersion';
 
-export default function VoterPage({ mode = 'production' }) {
+export default function UpgradeableVoterPage({ mode = 'production' }) {
   return (
     <div className="page-grid">
       <section className="card">
-        <h2>Available Votes {mode === 'local' && '(Local Testing)'}</h2>
-        <VoteList mode={mode} />
+        <h2>Upgradeable Voter ({VERSION_LABEL}) {mode === 'local' && '(Local Testing)'}</h2>
+        <UpgradeableVoteList mode={mode} />
       </section>
 
       <aside className="card info">
-        <h3>How to vote</h3>
+        <h3>How to vote (Upgradeable)</h3>
         {mode === 'local' ? (
           <ol>
-            <li>Click an account button (Account #0, #1, #2, #3, or #4)</li>
+            <li>Click an account button (Account #1–4 are voters)</li>
             <li>View polls you're authorized for</li>
             <li>Click "Show Candidates & Vote"</li>
             <li>Click "Vote" on your choice</li>
-            <li>No MetaMask needed!</li>
           </ol>
         ) : (
           <ol>
@@ -27,11 +27,10 @@ export default function VoterPage({ mode = 'production' }) {
             <li>Confirm transaction in MetaMask</li>
           </ol>
         )}
-
         <div style={{ marginTop: 16 }}>
           <a
             className="btn ghost"
-            href={mode === 'local' ? '/local/results' : '/results'}
+            href={mode === 'local' ? '/local/upgradeable/results' : '/upgradeable/results'}
             style={{ textDecoration: 'none' }}
           >
             View Results Portal
