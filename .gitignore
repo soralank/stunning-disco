@@ -8,7 +8,6 @@ build/
 .env.test.local
 npm-debug.log
 .DS_Store
-package-lock.json
 .claude/
 
 # Debug & temp scripts (never commit)
