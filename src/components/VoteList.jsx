@@ -1,4 +1,5 @@
 import React, { useEffect, useState, useMemo } from 'react';
+import { Link } from 'react-router-dom';
 import { getProvider, getSigner, getContract, getContractErrorDetails, sendTxWithNonceRetry, getSecretBallotManagerContract, getVotingPaymasterContract, getVotingPaymasterAt, getVotingReaderContract, resolveIpfsUri } from '../contract';
 import { ethers } from 'ethers';
 import Pagination from './Pagination';
@@ -1449,7 +1450,7 @@ export default function VoteList({ mode = 'production' }) {
             <div className="muted small">
               <strong>Steps to see polls here:</strong>
               <ol style={{ textAlign: 'left', margin: '8px auto', maxWidth: 420 }}>
-                <li>Go to <a href="/local/admin">/local/admin</a> and connect as Account #0 (Owner)</li>
+                <li>Go to <Link to="/local/admin">/local/admin</Link> and connect as Account #0 (Owner)</li>
                 <li>Create a poll</li>
                 <li>Add this address as an authorized voter in the "Authorize Voters" section</li>
                 <li>Come back here and reconnect</li>
@@ -1458,9 +1459,9 @@ export default function VoteList({ mode = 'production' }) {
           )}
           <div className="muted small">
             Looking for ended polls? Visit the results portal at{' '}
-            <a href={mode === 'local' ? '/local/results' : '/results'}>
+            <Link to={mode === 'local' ? '/local/results' : '/results'}>
               {mode === 'local' ? '/local/results' : '/results'}
-            </a>.
+            </Link>.
           </div>
         </div>
       ) : (
