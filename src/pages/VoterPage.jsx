@@ -1,4 +1,5 @@
 import React from 'react';
+import { Link } from 'react-router-dom';
 import VoteList from '../components/VoteList';
 
 export default function VoterPage({ mode = 'production' }) {
@@ -29,13 +30,13 @@ export default function VoterPage({ mode = 'production' }) {
         )}
 
         <div style={{ marginTop: 16 }}>
-          <a
+          <Link
             className="btn ghost"
-            href={mode === 'local' ? '/local/results' : '/results'}
+            to={mode === 'local' ? '/local/results' : '/results'}
             style={{ textDecoration: 'none' }}
           >
             View Results Portal
-          </a>
+          </Link>
         </div>
       </aside>
     </div>

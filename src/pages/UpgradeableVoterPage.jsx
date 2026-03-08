@@ -1,4 +1,5 @@
 import React from 'react';
+import { Link } from 'react-router-dom';
 import UpgradeableVoteList from '../components/UpgradeableVoteList';
 import { VERSION_LABEL } from '../utils/contractVersion';
 
@@ -28,13 +29,13 @@ export default function UpgradeableVoterPage({ mode = 'production' }) {
           </ol>
         )}
         <div style={{ marginTop: 16 }}>
-          <a
+          <Link
             className="btn ghost"
-            href={mode === 'local' ? '/local/upgradeable/results' : '/upgradeable/results'}
+            to={mode === 'local' ? '/local/upgradeable/results' : '/upgradeable/results'}
             style={{ textDecoration: 'none' }}
           >
             View Results Portal
-          </a>
+          </Link>
         </div>
       </aside>
     </div>
