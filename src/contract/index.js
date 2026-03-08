@@ -81,6 +81,16 @@ let _browserProvider = null;
 let _jsonRpcProvider = null;
 let _injectedProvider = null;
 
+function clearBrowserProviderCache() {
+	_browserProvider = null;
+	_injectedProvider = null;
+}
+
+function isNetworkChangedError(err) {
+	const message = (err?.shortMessage || err?.message || String(err || '')).toLowerCase();
+	return err?.code === 'NETWORK_ERROR' && message.includes('network changed');
+}
+
 function getInjectedEthereumProvider() {
 	if (typeof window === 'undefined' || !window.ethereum) return null;
 	const injected = window.ethereum;
@@ -100,13 +110,14 @@ async function ensureExpectedChain(injectedProvider) {
 	const expectedHex = `0x${expectedDec.toString(16)}`;
 
 	const currentChainId = await injectedProvider.request({ method: 'eth_chainId' });
-	if ((currentChainId || '').toLowerCase() === expectedHex.toLowerCase()) return;
+	if ((currentChainId || '').toLowerCase() === expectedHex.toLowerCase()) return false;
 
 	try {
 		await injectedProvider.request({
 			method: 'wallet_switchEthereumChain',
 			params: [{ chainId: expectedHex }],
 		});
+		return true;
 	} catch (switchErr) {
 		// 4902 = requested chain not added to wallet.
 		if (switchErr?.code === 4902 && expectedDec === 11155111) {
@@ -124,7 +135,7 @@ async function ensureExpectedChain(injectedProvider) {
 				method: 'wallet_switchEthereumChain',
 				params: [{ chainId: expectedHex }],
 			});
-			return;
+			return true;
 		}
 		throw switchErr;
 	}
@@ -161,7 +172,11 @@ function getEnvValue(...keys) {
 export async function getSigner() {
 	const injected = getInjectedEthereumProvider();
 	if (injected) {
-		await ensureExpectedChain(injected);
+		const switched = await ensureExpectedChain(injected);
+		if (switched) {
+			// Recreate BrowserProvider after chain switch to avoid stale-network errors.
+			clearBrowserProviderCache();
+		}
 		const p = getProvider();
 		await p.send('eth_requestAccounts', []);
 		return p.getSigner();
@@ -569,6 +584,21 @@ export async function verifyChainId(providerOrSigner) {
 			return `Wrong network: connected to chain ${actual} (${network.name || 'unknown'}) but expected chain ${expected}. Please switch networks in your wallet.`;
 		}
 	} catch (err) {
+		if (isNetworkChangedError(err)) {
+			try {
+				clearBrowserProviderCache();
+				const retryProvider = getProvider();
+				const retryNetwork = await retryProvider.getNetwork();
+				const actual = Number(retryNetwork.chainId);
+				const expected = Number(expectedChainId);
+				if (actual !== expected) {
+					return `Wrong network: connected to chain ${actual} (${retryNetwork.name || 'unknown'}) but expected chain ${expected}. Please switch networks in your wallet.`;
+				}
+				return null;
+			} catch (retryErr) {
+				return `Unable to verify network after retry: ${retryErr.message || 'unknown error'}. Please reconnect your wallet.`;
+			}
+		}
 		return `Unable to verify network: ${err.message || 'unknown error'}. Please check your wallet connection.`;
 	}
 	return null;
