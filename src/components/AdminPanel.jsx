@@ -2813,12 +2813,16 @@ export default function AdminPanel({ mode = 'production', role }) {
 
   // ─── Helper: render poll selector dropdown ─────────────────────────────────
   function PollSelect({ value, onChange, filterFn, placeholder = 'Select Poll', className = 'form-input' }) {
-    // Always scope to polls where the connected user is the admin
-    const myPolls = polls.filter(p => p.admin?.toLowerCase() === addr?.toLowerCase());
-    const filtered = filterFn ? myPolls.filter(filterFn) : myPolls;
+    // In franchisee mode, keep selectors scoped to the connected franchisee's polls.
+    // In owner/admin mode, allow selecting from all polls.
+    const scopedPolls = (isFranchiseeRole && !isOwner)
+      ? polls.filter(p => p.admin?.toLowerCase() === addr?.toLowerCase())
+      : polls;
+    const filtered = filterFn ? scopedPolls.filter(filterFn) : scopedPolls;
     return (
       <select value={value} onChange={onChange} className={className}>
         <option value="">{placeholder}</option>
+        {filtered.length === 0 && <option value="" disabled>No eligible polls available</option>}
         {filtered.map(poll => (
           <option key={poll.id} value={poll.id}>
             Poll #{poll.id}: {poll.title}
