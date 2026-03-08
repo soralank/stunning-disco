@@ -79,11 +79,63 @@ devWarn(`Upgradeable ABI: using ${IS_V2 ? 'V2' : 'V1'} (${UPGRADEABLE_ABI.length
 // Cache providers to avoid creating duplicate instances (which causes nonce tracking issues)
 let _browserProvider = null;
 let _jsonRpcProvider = null;
+let _injectedProvider = null;
+
+function getInjectedEthereumProvider() {
+	if (typeof window === 'undefined' || !window.ethereum) return null;
+	const injected = window.ethereum;
+	if (Array.isArray(injected.providers) && injected.providers.length > 0) {
+		// Prefer MetaMask when multiple wallet extensions inject providers.
+		return injected.providers.find((provider) => provider?.isMetaMask) || injected.providers[0];
+	}
+	return injected;
+}
+
+async function ensureExpectedChain(injectedProvider) {
+	const expectedChainId = process.env.REACT_APP_CHAIN_ID;
+	if (!expectedChainId || !injectedProvider?.request) return;
+
+	const expectedDec = Number(expectedChainId);
+	if (!Number.isFinite(expectedDec)) return;
+	const expectedHex = `0x${expectedDec.toString(16)}`;
+
+	const currentChainId = await injectedProvider.request({ method: 'eth_chainId' });
+	if ((currentChainId || '').toLowerCase() === expectedHex.toLowerCase()) return;
+
+	try {
+		await injectedProvider.request({
+			method: 'wallet_switchEthereumChain',
+			params: [{ chainId: expectedHex }],
+		});
+	} catch (switchErr) {
+		// 4902 = requested chain not added to wallet.
+		if (switchErr?.code === 4902 && expectedDec === 11155111) {
+			await injectedProvider.request({
+				method: 'wallet_addEthereumChain',
+				params: [{
+					chainId: '0xaa36a7',
+					chainName: 'Sepolia',
+					nativeCurrency: { name: 'SepoliaETH', symbol: 'SepoliaETH', decimals: 18 },
+					rpcUrls: ['https://rpc.sepolia.org'],
+					blockExplorerUrls: ['https://sepolia.etherscan.io']
+				}],
+			});
+			await injectedProvider.request({
+				method: 'wallet_switchEthereumChain',
+				params: [{ chainId: expectedHex }],
+			});
+			return;
+		}
+		throw switchErr;
+	}
+}
 
 export function getProvider() {
-	if (typeof window !== 'undefined' && window.ethereum) {
-		if (!_browserProvider) {
-			_browserProvider = new ethers.BrowserProvider(window.ethereum);
+	const injected = getInjectedEthereumProvider();
+	if (injected) {
+		if (!_browserProvider || _injectedProvider !== injected) {
+			_injectedProvider = injected;
+			_browserProvider = new ethers.BrowserProvider(injected);
 		}
 		return _browserProvider;
 	}
@@ -107,11 +159,14 @@ function getEnvValue(...keys) {
 }
 
 export async function getSigner() {
-	const p = getProvider();
-	if (typeof window !== 'undefined' && window.ethereum) {
+	const injected = getInjectedEthereumProvider();
+	if (injected) {
+		await ensureExpectedChain(injected);
+		const p = getProvider();
 		await p.send('eth_requestAccounts', []);
 		return p.getSigner();
 	}
+	const p = getProvider();
 	const accounts = await p.listAccounts();
 	return p.getSigner(accounts[0]);
 }

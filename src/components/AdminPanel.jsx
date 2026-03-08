@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useMemo } from 'react';
-import { getSigner, getContract, getProvider, getContractErrorDetails, sendTxWithNonceRetry, getSecretBallotManagerContract, getFranchiseManagerContract, getVotingPaymasterAt, deployVotingPaymaster, getVotingReaderContract, resolveIpfsUri } from '../contract';
+import { getSigner, getContract, getProvider, getContractErrorDetails, sendTxWithNonceRetry, getSecretBallotManagerContract, getFranchiseManagerContract, getVotingPaymasterAt, deployVotingPaymaster, getVotingReaderContract, resolveIpfsUri, verifyChainId } from '../contract';
 import { ethers } from 'ethers';
 import Pagination from './Pagination';
 import SearchBar from './SearchBar';
@@ -220,6 +220,14 @@ export default function AdminPanel({ mode = 'production', role }) {
     try {
       const signer = await getSigner();
       const address = await signer.getAddress();
+      const chainWarning = await verifyChainId(signer);
+      if (chainWarning) {
+        setAddr(address);
+        setWalletSigner(null);
+        setIsOwner(false);
+        setStatus(`Network Error: ${chainWarning}`);
+        return;
+      }
       setAddr(address);
       setWalletSigner(null);
       setStatus(`Connected: ${address}`);
@@ -252,6 +260,15 @@ export default function AdminPanel({ mode = 'production', role }) {
       const provider = new ethers.JsonRpcProvider(rpc);
       const wallet = new ethers.Wallet(account.key, provider);
       const address = await wallet.getAddress();
+      const chainWarning = await verifyChainId(wallet);
+      if (chainWarning) {
+        setWalletSigner(wallet);
+        setAddr(address);
+        setSelectedAccount(accountIndex);
+        setIsOwner(false);
+        setStatus(`Network Error: ${chainWarning}`);
+        return;
+      }
 
       setWalletSigner(wallet);
       setAddr(address);
